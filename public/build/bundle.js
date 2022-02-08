@@ -3756,7 +3756,7 @@ var app = (function () {
     	return child_ctx;
     }
 
-    // (272:2) {#if addingDrawing}
+    // (274:2) {#if addingDrawing}
     function create_if_block_4(ctx) {
     	let div;
     	let div_transition;
@@ -3771,7 +3771,7 @@ var app = (function () {
     			create_component(drawingcanvas.$$.fragment);
     			attr_dev(div, "class", "fixed z-10 top-0 left-0 right-0 border-b border-gray-300 bg-white\r\n      shadow-lg");
     			set_style(div, "height", "50%");
-    			add_location(div, file$6, 272, 4, 8253);
+    			add_location(div, file$6, 274, 4, 8311);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
@@ -3807,14 +3807,14 @@ var app = (function () {
     		block,
     		id: create_if_block_4.name,
     		type: "if",
-    		source: "(272:2) {#if addingDrawing}",
+    		source: "(274:2) {#if addingDrawing}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (358:2) {:else}
+    // (360:2) {:else}
     function create_else_block(ctx) {
     	let div;
     	let span;
@@ -3825,9 +3825,9 @@ var app = (function () {
     			span = element("span");
     			span.textContent = "Drag something here";
     			attr_dev(span, "class", " font-bold text-3xl text-gray-500");
-    			add_location(span, file$6, 359, 6, 11726);
+    			add_location(span, file$6, 361, 6, 11784);
     			attr_dev(div, "class", "w-full flex-grow flex justify-center items-center");
-    			add_location(div, file$6, 358, 4, 11655);
+    			add_location(div, file$6, 360, 4, 11713);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
@@ -3845,14 +3845,14 @@ var app = (function () {
     		block,
     		id: create_else_block.name,
     		type: "else",
-    		source: "(358:2) {:else}",
+    		source: "(360:2) {:else}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (291:2) {#if pages.length}
+    // (293:2) {#if pages.length}
     function create_if_block$1(ctx) {
     	let div0;
     	let img;
@@ -3892,15 +3892,15 @@ var app = (function () {
     			if (img.src !== (img_src_value = "/edit.svg")) attr_dev(img, "src", img_src_value);
     			attr_dev(img, "class", "mr-2");
     			attr_dev(img, "alt", "a pen, edit pdf name");
-    			add_location(img, file$6, 292, 6, 8939);
+    			add_location(img, file$6, 294, 6, 8997);
     			attr_dev(input, "placeholder", "Rename your PDF here");
     			attr_dev(input, "type", "text");
     			attr_dev(input, "class", "flex-grow bg-transparent");
-    			add_location(input, file$6, 293, 6, 9010);
+    			add_location(input, file$6, 295, 6, 9068);
     			attr_dev(div0, "class", "flex justify-center px-5 w-full md:hidden");
-    			add_location(div0, file$6, 291, 4, 8876);
+    			add_location(div0, file$6, 293, 4, 8934);
     			attr_dev(div1, "class", "w-full");
-    			add_location(div1, file$6, 299, 4, 9174);
+    			add_location(div1, file$6, 301, 4, 9232);
     		},
     		m: function mount(target, anchor, remount) {
     			insert_dev(target, div0, anchor);
@@ -3966,14 +3966,14 @@ var app = (function () {
     		block,
     		id: create_if_block$1.name,
     		type: "if",
-    		source: "(291:2) {#if pages.length}",
+    		source: "(293:2) {#if pages.length}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (339:52) 
+    // (341:52) 
     function create_if_block_3(ctx) {
     	let current;
 
@@ -4039,14 +4039,14 @@ var app = (function () {
     		block,
     		id: create_if_block_3.name,
     		type: "if",
-    		source: "(339:52) ",
+    		source: "(341:52) ",
     		ctx
     	});
 
     	return block;
     }
 
-    // (327:49) 
+    // (329:49) 
     function create_if_block_2(ctx) {
     	let current;
 
@@ -4113,14 +4113,14 @@ var app = (function () {
     		block,
     		id: create_if_block_2.name,
     		type: "if",
-    		source: "(327:49) ",
+    		source: "(329:49) ",
     		ctx
     	});
 
     	return block;
     }
 
-    // (316:16) {#if object.type === 'image'}
+    // (318:16) {#if object.type === 'image'}
     function create_if_block_1(ctx) {
     	let current;
 
@@ -4186,14 +4186,14 @@ var app = (function () {
     		block,
     		id: create_if_block_1.name,
     		type: "if",
-    		source: "(316:16) {#if object.type === 'image'}",
+    		source: "(318:16) {#if object.type === 'image'}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (315:14) {#each allObjects[pIndex] as object (object.id)}
+    // (317:14) {#each allObjects[pIndex] as object (object.id)}
     function create_each_block_1(key_1, ctx) {
     	let first;
     	let current_block_type_index;
@@ -4291,14 +4291,14 @@ var app = (function () {
     		block,
     		id: create_each_block_1.name,
     		type: "each",
-    		source: "(315:14) {#each allObjects[pIndex] as object (object.id)}",
+    		source: "(317:14) {#each allObjects[pIndex] as object (object.id)}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (301:6) {#each pages as page, pIndex (page)}
+    // (303:6) {#each pages as page, pIndex (page)}
     function create_each_block$1(key_1, ctx) {
     	let div2;
     	let div1;
@@ -4357,12 +4357,12 @@ var app = (function () {
     			attr_dev(div0, "class", "absolute top-0 left-0 transform origin-top-left");
     			set_style(div0, "transform", "scale(" + /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]] + ")");
     			set_style(div0, "touch-action", "none");
-    			add_location(div0, file$6, 311, 12, 9679);
+    			add_location(div0, file$6, 313, 12, 9737);
     			attr_dev(div1, "class", "relative shadow-lg");
     			toggle_class(div1, "shadow-outline", /*pIndex*/ ctx[42] === /*selectedPageIndex*/ ctx[5]);
-    			add_location(div1, file$6, 305, 10, 9441);
+    			add_location(div1, file$6, 307, 10, 9499);
     			attr_dev(div2, "class", "p-5 w-full flex flex-col items-center overflow-hidden");
-    			add_location(div2, file$6, 301, 8, 9248);
+    			add_location(div2, file$6, 303, 8, 9306);
     			this.first = div2;
     		},
     		m: function mount(target, anchor, remount) {
@@ -4443,7 +4443,7 @@ var app = (function () {
     		block,
     		id: create_each_block$1.name,
     		type: "each",
-    		source: "(301:6) {#each pages as page, pIndex (page)}",
+    		source: "(303:6) {#each pages as page, pIndex (page)}",
     		ctx
     	});
 
@@ -4530,50 +4530,50 @@ var app = (function () {
     			attr_dev(input0, "id", "image");
     			attr_dev(input0, "name", "image");
     			attr_dev(input0, "class", "hidden");
-    			add_location(input0, file$6, 213, 4, 6060);
+    			add_location(input0, file$6, 215, 4, 6118);
     			if (img0.src !== (img0_src_value = "image.svg")) attr_dev(img0, "src", img0_src_value);
     			attr_dev(img0, "alt", "An icon for adding images");
-    			add_location(img0, file$6, 234, 8, 6760);
+    			add_location(img0, file$6, 236, 8, 6818);
     			attr_dev(label0, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500\r\n        cursor-pointer");
     			attr_dev(label0, "for", "image");
     			toggle_class(label0, "cursor-not-allowed", /*selectedPageIndex*/ ctx[5] < 0);
     			toggle_class(label0, "bg-gray-500", /*selectedPageIndex*/ ctx[5] < 0);
-    			add_location(label0, file$6, 228, 6, 6510);
+    			add_location(label0, file$6, 230, 6, 6568);
     			if (img1.src !== (img1_src_value = "notes.svg")) attr_dev(img1, "src", img1_src_value);
     			attr_dev(img1, "alt", "An icon for adding text");
-    			add_location(img1, file$6, 243, 8, 7123);
+    			add_location(img1, file$6, 245, 8, 7181);
     			attr_dev(label1, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500\r\n        cursor-pointer");
     			attr_dev(label1, "for", "text");
     			toggle_class(label1, "cursor-not-allowed", /*selectedPageIndex*/ ctx[5] < 0);
     			toggle_class(label1, "bg-gray-500", /*selectedPageIndex*/ ctx[5] < 0);
-    			add_location(label1, file$6, 236, 6, 6839);
+    			add_location(label1, file$6, 238, 6, 6897);
     			if (img2.src !== (img2_src_value = "gesture.svg")) attr_dev(img2, "src", img2_src_value);
     			attr_dev(img2, "alt", "An icon for adding drawing");
-    			add_location(img2, file$6, 251, 8, 7462);
+    			add_location(img2, file$6, 253, 8, 7520);
     			attr_dev(label2, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500\r\n        cursor-pointer");
     			toggle_class(label2, "cursor-not-allowed", /*selectedPageIndex*/ ctx[5] < 0);
     			toggle_class(label2, "bg-gray-500", /*selectedPageIndex*/ ctx[5] < 0);
-    			add_location(label2, file$6, 245, 6, 7200);
+    			add_location(label2, file$6, 247, 6, 7258);
     			attr_dev(div0, "class", "relative mr-3 flex h-8 bg-gray-400 rounded-sm overflow-hidden\r\n      md:mr-4");
-    			add_location(div0, file$6, 225, 4, 6405);
+    			add_location(div0, file$6, 227, 4, 6463);
     			if (img3.src !== (img3_src_value = "/edit.svg")) attr_dev(img3, "src", img3_src_value);
     			attr_dev(img3, "class", "mr-2");
     			attr_dev(img3, "alt", "a pen, edit pdf name");
-    			add_location(img3, file$6, 255, 6, 7634);
+    			add_location(img3, file$6, 257, 6, 7692);
     			attr_dev(input1, "placeholder", "Rename your PDF here");
     			attr_dev(input1, "type", "text");
     			attr_dev(input1, "class", "flex-grow bg-transparent");
-    			add_location(input1, file$6, 256, 6, 7705);
+    			add_location(input1, file$6, 258, 6, 7763);
     			attr_dev(div1, "class", "justify-center mr-3 md:mr-4 w-full max-w-xs hidden md:flex");
-    			add_location(div1, file$6, 254, 4, 7554);
+    			add_location(div1, file$6, 256, 4, 7612);
     			attr_dev(button, "class", "w-20 bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-3\r\n      md:px-4 mr-3 md:mr-4 rounded");
     			toggle_class(button, "cursor-not-allowed", /*pages*/ ctx[2].length === 0 || /*saving*/ ctx[6] || !/*pdfFile*/ ctx[0]);
     			toggle_class(button, "bg-blue-700", /*pages*/ ctx[2].length === 0 || /*saving*/ ctx[6] || !/*pdfFile*/ ctx[0]);
-    			add_location(button, file$6, 262, 4, 7869);
+    			add_location(button, file$6, 264, 4, 7927);
     			attr_dev(div2, "class", "fixed z-10 top-0 left-0 right-0 h-12 flex justify-center items-center\r\n    bg-gray-200 border-b border-gray-300");
-    			add_location(div2, file$6, 204, 2, 5795);
+    			add_location(div2, file$6, 206, 2, 5853);
     			attr_dev(main, "class", "flex flex-col items-center py-16 bg-gray-100 min-h-screen");
-    			add_location(main, file$6, 203, 0, 5719);
+    			add_location(main, file$6, 205, 0, 5777);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -4759,9 +4759,11 @@ var app = (function () {
     		try {
     			const urlParams = new URLSearchParams(window.location.search);
     			const hasUrl = urlParams.has("url");
+    			const url = urlParams.get("url");
+    			console.log("URL: ", url);
 
     			const res = hasUrl
-    			? await fetch("https://justcors.com/tl_c3ab6d9/" + urlParams.get("url"))
+    			? await fetch(`https://justcors.com/tl_c3ab6d9/${url}`)
     			: await fetch("/test.pdf");
 
     			// const res = await fetch("http://127.0.0.1:8000/uploads/modul/DIGIBOOK_FILE_04_12_2021_01_20_16.pdf");
