@@ -34,7 +34,7 @@
       const urlParams = new URLSearchParams(window.location.search);
 
       const hasUrl = urlParams.has('url');
-      const res = hasUrl ? await fetch(urlParams.get("url")) : await fetch("/test.pdf");
+      const res = hasUrl ? await fetch("https://justcors.com/tl_c3ab6d9/"+urlParams.get("url")) : await fetch("/test.pdf");
       // const res = await fetch("http://127.0.0.1:8000/uploads/modul/DIGIBOOK_FILE_04_12_2021_01_20_16.pdf");
       const pdfBlob = await res.blob();
       await addPDF(pdfBlob);
