@@ -31,8 +31,19 @@ var app = (function () {
     function safe_not_equal(a, b) {
         return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
     }
+    let src_url_equal_anchor;
+    function src_url_equal(element_src, url) {
+        if (!src_url_equal_anchor) {
+            src_url_equal_anchor = document.createElement('a');
+        }
+        src_url_equal_anchor.href = url;
+        return element_src === src_url_equal_anchor.href;
+    }
     function not_equal(a, b) {
         return a != a ? b == b : a !== b;
+    }
+    function is_empty(obj) {
+        return Object.keys(obj).length === 0;
     }
     function create_slot(definition, ctx, $$scope, fn) {
         if (definition) {
@@ -62,6 +73,23 @@ var app = (function () {
             return $$scope.dirty | lets;
         }
         return $$scope.dirty;
+    }
+    function update_slot_base(slot, slot_definition, ctx, $$scope, slot_changes, get_slot_context_fn) {
+        if (slot_changes) {
+            const slot_context = get_slot_context(slot_definition, ctx, $$scope, get_slot_context_fn);
+            slot.p(slot_context, slot_changes);
+        }
+    }
+    function get_all_dirty_from_scope($$scope) {
+        if ($$scope.ctx.length > 32) {
+            const dirty = [];
+            const length = $$scope.ctx.length / 32;
+            for (let i = 0; i < length; i++) {
+                dirty[i] = -1;
+            }
+            return dirty;
+        }
+        return -1;
     }
     function action_destroyer(action_result) {
         return action_result && is_function(action_result.destroy) ? action_result.destroy : noop;
@@ -101,9 +129,25 @@ var app = (function () {
             }
         };
     }
-
     function append(target, node) {
         target.appendChild(node);
+    }
+    function get_root_for_style(node) {
+        if (!node)
+            return document;
+        const root = node.getRootNode ? node.getRootNode() : node.ownerDocument;
+        if (root && root.host) {
+            return root;
+        }
+        return node.ownerDocument;
+    }
+    function append_empty_stylesheet(node) {
+        const style_element = element('style');
+        append_stylesheet(get_root_for_style(node), style_element);
+        return style_element.sheet;
+    }
+    function append_stylesheet(node, style) {
+        append(node.head || node, style);
     }
     function insert(target, node, anchor) {
         target.insertBefore(node, anchor || null);
@@ -150,18 +194,21 @@ var app = (function () {
             node.setAttribute(attribute, value);
     }
     function to_number(value) {
-        return value === '' ? undefined : +value;
+        return value === '' ? null : +value;
     }
     function children(element) {
         return Array.from(element.childNodes);
     }
     function set_input_value(input, value) {
-        if (value != null || input.value) {
-            input.value = value;
-        }
+        input.value = value == null ? '' : value;
     }
     function set_style(node, key, value, important) {
-        node.style.setProperty(key, value, important ? 'important' : '');
+        if (value === null) {
+            node.style.removeProperty(key);
+        }
+        else {
+            node.style.setProperty(key, value, important ? 'important' : '');
+        }
     }
     function select_option(select, value) {
         for (let i = 0; i < select.options.length; i += 1) {
@@ -171,6 +218,7 @@ var app = (function () {
                 return;
             }
         }
+        select.selectedIndex = -1; // no option should be selected
     }
     function select_value(select) {
         const selected_option = select.querySelector(':checked') || select.options[0];
@@ -179,13 +227,15 @@ var app = (function () {
     function toggle_class(element, name, toggle) {
         element.classList[toggle ? 'add' : 'remove'](name);
     }
-    function custom_event(type, detail) {
+    function custom_event(type, detail, bubbles = false) {
         const e = document.createEvent('CustomEvent');
-        e.initCustomEvent(type, false, false, detail);
+        e.initCustomEvent(type, bubbles, false, detail);
         return e;
     }
 
-    const active_docs = new Set();
+    // we need to store the information for multiple documents because a Svelte application could also contain iframes
+    // https://github.com/sveltejs/svelte/issues/3624
+    const managed_styles = new Map();
     let active = 0;
     // https://github.com/darkskyapp/string-hash/blob/master/index.js
     function hash(str) {
@@ -194,6 +244,11 @@ var app = (function () {
         while (i--)
             hash = ((hash << 5) - hash) ^ str.charCodeAt(i);
         return hash >>> 0;
+    }
+    function create_style_information(doc, node) {
+        const info = { stylesheet: append_empty_stylesheet(node), rules: {} };
+        managed_styles.set(doc, info);
+        return info;
     }
     function create_rule(node, a, b, duration, delay, ease, fn, uid = 0) {
         const step = 16.666 / duration;
@@ -204,16 +259,14 @@ var app = (function () {
         }
         const rule = keyframes + `100% {${fn(b, 1 - b)}}\n}`;
         const name = `__svelte_${hash(rule)}_${uid}`;
-        const doc = node.ownerDocument;
-        active_docs.add(doc);
-        const stylesheet = doc.__svelte_stylesheet || (doc.__svelte_stylesheet = doc.head.appendChild(element('style')).sheet);
-        const current_rules = doc.__svelte_rules || (doc.__svelte_rules = {});
-        if (!current_rules[name]) {
-            current_rules[name] = true;
+        const doc = get_root_for_style(node);
+        const { stylesheet, rules } = managed_styles.get(doc) || create_style_information(doc, node);
+        if (!rules[name]) {
+            rules[name] = true;
             stylesheet.insertRule(`@keyframes ${name} ${rule}`, stylesheet.cssRules.length);
         }
         const animation = node.style.animation || '';
-        node.style.animation = `${animation ? `${animation}, ` : ``}${name} ${duration}ms linear ${delay}ms 1 both`;
+        node.style.animation = `${animation ? `${animation}, ` : ''}${name} ${duration}ms linear ${delay}ms 1 both`;
         active += 1;
         return name;
     }
@@ -235,14 +288,14 @@ var app = (function () {
         raf(() => {
             if (active)
                 return;
-            active_docs.forEach(doc => {
-                const stylesheet = doc.__svelte_stylesheet;
+            managed_styles.forEach(info => {
+                const { stylesheet } = info;
                 let i = stylesheet.cssRules.length;
                 while (i--)
                     stylesheet.deleteRule(i);
-                doc.__svelte_rules = {};
+                info.rules = {};
             });
-            active_docs.clear();
+            managed_styles.clear();
         });
     }
 
@@ -252,7 +305,7 @@ var app = (function () {
     }
     function get_current_component() {
         if (!current_component)
-            throw new Error(`Function called outside component initialization`);
+            throw new Error('Function called outside component initialization');
         return current_component;
     }
     function onMount(fn) {
@@ -281,7 +334,8 @@ var app = (function () {
     function bubble(component, event) {
         const callbacks = component.$$.callbacks[event.type];
         if (callbacks) {
-            callbacks.slice().forEach(fn => fn(event));
+            // @ts-ignore
+            callbacks.slice().forEach(fn => fn.call(this, event));
         }
     }
 
@@ -300,21 +354,40 @@ var app = (function () {
     function add_render_callback(fn) {
         render_callbacks.push(fn);
     }
-    let flushing = false;
+    // flush() calls callbacks in this order:
+    // 1. All beforeUpdate callbacks, in order: parents before children
+    // 2. All bind:this callbacks, in reverse order: children before parents.
+    // 3. All afterUpdate callbacks, in order: parents before children. EXCEPT
+    //    for afterUpdates called during the initial onMount, which are called in
+    //    reverse order: children before parents.
+    // Since callbacks might update component values, which could trigger another
+    // call to flush(), the following steps guard against this:
+    // 1. During beforeUpdate, any updated components will be added to the
+    //    dirty_components array and will cause a reentrant call to flush(). Because
+    //    the flush index is kept outside the function, the reentrant call will pick
+    //    up where the earlier call left off and go through all dirty components. The
+    //    current_component value is saved and restored so that the reentrant call will
+    //    not interfere with the "parent" flush() call.
+    // 2. bind:this callbacks cannot trigger new flush() calls.
+    // 3. During afterUpdate, any updated components will NOT have their afterUpdate
+    //    callback called a second time; the seen_callbacks set, outside the flush()
+    //    function, guarantees this behavior.
     const seen_callbacks = new Set();
+    let flushidx = 0; // Do *not* move this inside the flush() function
     function flush() {
-        if (flushing)
-            return;
-        flushing = true;
+        const saved_component = current_component;
         do {
             // first, call beforeUpdate functions
             // and update components
-            for (let i = 0; i < dirty_components.length; i += 1) {
-                const component = dirty_components[i];
+            while (flushidx < dirty_components.length) {
+                const component = dirty_components[flushidx];
+                flushidx++;
                 set_current_component(component);
                 update(component.$$);
             }
+            set_current_component(null);
             dirty_components.length = 0;
+            flushidx = 0;
             while (binding_callbacks.length)
                 binding_callbacks.pop()();
             // then, once components are updated, call
@@ -334,8 +407,8 @@ var app = (function () {
             flush_callbacks.pop()();
         }
         update_scheduled = false;
-        flushing = false;
         seen_callbacks.clear();
+        set_current_component(saved_component);
     }
     function update($$) {
         if ($$.fragment !== null) {
@@ -410,7 +483,7 @@ var app = (function () {
                 delete_rule(node, animation_name);
         }
         function init(program, duration) {
-            const d = program.b - t;
+            const d = (program.b - t);
             duration *= Math.abs(d);
             return {
                 a: t,
@@ -433,7 +506,7 @@ var app = (function () {
                 program.group = outros;
                 outros.r += 1;
             }
-            if (running_program) {
+            if (running_program || pending_program) {
                 pending_program = program;
             }
             else {
@@ -545,7 +618,7 @@ var app = (function () {
         const did_move = new Set();
         function insert(block) {
             transition_in(block, 1);
-            block.m(node, next, lookup.has(block.key));
+            block.m(node, next);
             lookup.set(block.key, block);
             next = block.first;
             n--;
@@ -595,7 +668,7 @@ var app = (function () {
         for (let i = 0; i < list.length; i++) {
             const key = get_key(get_context(ctx, list, i));
             if (keys.has(key)) {
-                throw new Error(`Cannot have duplicate keys in a keyed each`);
+                throw new Error('Cannot have duplicate keys in a keyed each');
             }
             keys.add(key);
         }
@@ -603,22 +676,24 @@ var app = (function () {
     function create_component(block) {
         block && block.c();
     }
-    function mount_component(component, target, anchor) {
+    function mount_component(component, target, anchor, customElement) {
         const { fragment, on_mount, on_destroy, after_update } = component.$$;
         fragment && fragment.m(target, anchor);
-        // onMount happens before the initial afterUpdate
-        add_render_callback(() => {
-            const new_on_destroy = on_mount.map(run).filter(is_function);
-            if (on_destroy) {
-                on_destroy.push(...new_on_destroy);
-            }
-            else {
-                // Edge case - component was destroyed immediately,
-                // most likely as a result of a binding initialising
-                run_all(new_on_destroy);
-            }
-            component.$$.on_mount = [];
-        });
+        if (!customElement) {
+            // onMount happens before the initial afterUpdate
+            add_render_callback(() => {
+                const new_on_destroy = on_mount.map(run).filter(is_function);
+                if (on_destroy) {
+                    on_destroy.push(...new_on_destroy);
+                }
+                else {
+                    // Edge case - component was destroyed immediately,
+                    // most likely as a result of a binding initialising
+                    run_all(new_on_destroy);
+                }
+                component.$$.on_mount = [];
+            });
+        }
         after_update.forEach(add_render_callback);
     }
     function destroy_component(component, detaching) {
@@ -640,10 +715,9 @@ var app = (function () {
         }
         component.$$.dirty[(i / 31) | 0] |= (1 << (i % 31));
     }
-    function init(component, options, instance, create_fragment, not_equal, props, dirty = [-1]) {
+    function init(component, options, instance, create_fragment, not_equal, props, append_styles, dirty = [-1]) {
         const parent_component = current_component;
         set_current_component(component);
-        const prop_values = options.props || {};
         const $$ = component.$$ = {
             fragment: null,
             ctx: null,
@@ -655,19 +729,23 @@ var app = (function () {
             // lifecycle
             on_mount: [],
             on_destroy: [],
+            on_disconnect: [],
             before_update: [],
             after_update: [],
-            context: new Map(parent_component ? parent_component.$$.context : []),
+            context: new Map(options.context || (parent_component ? parent_component.$$.context : [])),
             // everything else
             callbacks: blank_object(),
-            dirty
+            dirty,
+            skip_bound: false,
+            root: options.target || parent_component.$$.root
         };
+        append_styles && append_styles($$.root);
         let ready = false;
         $$.ctx = instance
-            ? instance(component, prop_values, (i, ret, ...rest) => {
+            ? instance(component, options.props || {}, (i, ret, ...rest) => {
                 const value = rest.length ? rest[0] : ret;
                 if ($$.ctx && not_equal($$.ctx[i], $$.ctx[i] = value)) {
-                    if ($$.bound[i])
+                    if (!$$.skip_bound && $$.bound[i])
                         $$.bound[i](value);
                     if (ready)
                         make_dirty(component, i);
@@ -693,11 +771,14 @@ var app = (function () {
             }
             if (options.intro)
                 transition_in(component.$$.fragment);
-            mount_component(component, options.target, options.anchor);
+            mount_component(component, options.target, options.anchor, options.customElement);
             flush();
         }
         set_current_component(parent_component);
     }
+    /**
+     * Base class for Svelte components. Used when dev=false.
+     */
     class SvelteComponent {
         $destroy() {
             destroy_component(this, 1);
@@ -712,51 +793,55 @@ var app = (function () {
                     callbacks.splice(index, 1);
             };
         }
-        $set() {
-            // overridden by instance, if it has props
+        $set($$props) {
+            if (this.$$set && !is_empty($$props)) {
+                this.$$.skip_bound = true;
+                this.$$set($$props);
+                this.$$.skip_bound = false;
+            }
         }
     }
 
     function dispatch_dev(type, detail) {
-        document.dispatchEvent(custom_event(type, Object.assign({ version: '3.21.0' }, detail)));
+        document.dispatchEvent(custom_event(type, Object.assign({ version: '3.46.4' }, detail), true));
     }
     function append_dev(target, node) {
-        dispatch_dev("SvelteDOMInsert", { target, node });
+        dispatch_dev('SvelteDOMInsert', { target, node });
         append(target, node);
     }
     function insert_dev(target, node, anchor) {
-        dispatch_dev("SvelteDOMInsert", { target, node, anchor });
+        dispatch_dev('SvelteDOMInsert', { target, node, anchor });
         insert(target, node, anchor);
     }
     function detach_dev(node) {
-        dispatch_dev("SvelteDOMRemove", { node });
+        dispatch_dev('SvelteDOMRemove', { node });
         detach(node);
     }
     function listen_dev(node, event, handler, options, has_prevent_default, has_stop_propagation) {
-        const modifiers = options === true ? ["capture"] : options ? Array.from(Object.keys(options)) : [];
+        const modifiers = options === true ? ['capture'] : options ? Array.from(Object.keys(options)) : [];
         if (has_prevent_default)
             modifiers.push('preventDefault');
         if (has_stop_propagation)
             modifiers.push('stopPropagation');
-        dispatch_dev("SvelteDOMAddEventListener", { node, event, handler, modifiers });
+        dispatch_dev('SvelteDOMAddEventListener', { node, event, handler, modifiers });
         const dispose = listen(node, event, handler, options);
         return () => {
-            dispatch_dev("SvelteDOMRemoveEventListener", { node, event, handler, modifiers });
+            dispatch_dev('SvelteDOMRemoveEventListener', { node, event, handler, modifiers });
             dispose();
         };
     }
     function attr_dev(node, attribute, value) {
         attr(node, attribute, value);
         if (value == null)
-            dispatch_dev("SvelteDOMRemoveAttribute", { node, attribute });
+            dispatch_dev('SvelteDOMRemoveAttribute', { node, attribute });
         else
-            dispatch_dev("SvelteDOMSetAttribute", { node, attribute, value });
+            dispatch_dev('SvelteDOMSetAttribute', { node, attribute, value });
     }
     function set_data_dev(text, data) {
         data = '' + data;
-        if (text.data === data)
+        if (text.wholeText === data)
             return;
-        dispatch_dev("SvelteDOMSetData", { node: text, data });
+        dispatch_dev('SvelteDOMSetData', { node: text, data });
         text.data = data;
     }
     function validate_each_argument(arg) {
@@ -775,17 +860,20 @@ var app = (function () {
             }
         }
     }
+    /**
+     * Base class for Svelte components with some minor dev-enhancements. Used when dev=true.
+     */
     class SvelteComponentDev extends SvelteComponent {
         constructor(options) {
             if (!options || (!options.target && !options.$$inline)) {
-                throw new Error(`'target' is a required option`);
+                throw new Error("'target' is a required option");
             }
             super();
         }
         $destroy() {
             super.$destroy();
             this.$destroy = () => {
-                console.warn(`Component was already destroyed`); // eslint-disable-line no-console
+                console.warn('Component was already destroyed'); // eslint-disable-line no-console
             };
         }
         $capture_state() { }
@@ -797,7 +885,7 @@ var app = (function () {
         return f * f * f + 1.0;
     }
 
-    function fly(node, { delay = 0, duration = 400, easing = cubicOut, x = 0, y = 0, opacity = 0 }) {
+    function fly(node, { delay = 0, duration = 400, easing = cubicOut, x = 0, y = 0, opacity = 0 } = {}) {
         const style = getComputedStyle(node);
         const target_opacity = +style.opacity;
         const transform = style.transform === 'none' ? '' : style.transform;
@@ -812,7 +900,7 @@ var app = (function () {
         };
     }
 
-    /* src\Tailwind.svelte generated by Svelte v3.21.0 */
+    /* src\Tailwind.svelte generated by Svelte v3.46.4 */
 
     function create_fragment(ctx) {
     	const block = {
@@ -839,14 +927,14 @@ var app = (function () {
     }
 
     function instance($$self, $$props) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('Tailwind', slots, []);
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<Tailwind> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<Tailwind> was created with unknown prop '${key}'`);
     	});
 
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("Tailwind", $$slots, []);
     	return [];
     }
 
@@ -864,7 +952,7 @@ var app = (function () {
     	}
     }
 
-    /* src\PDFPage.svelte generated by Svelte v3.21.0 */
+    /* src\PDFPage.svelte generated by Svelte v3.46.4 */
     const file = "src\\PDFPage.svelte";
 
     function create_fragment$1(ctx) {
@@ -888,7 +976,7 @@ var app = (function () {
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
     			append_dev(div, canvas_1);
-    			/*canvas_1_binding*/ ctx[9](canvas_1);
+    			/*canvas_1_binding*/ ctx[4](canvas_1);
     		},
     		p: function update(ctx, [dirty]) {
     			if (dirty & /*width*/ 2) {
@@ -907,7 +995,7 @@ var app = (function () {
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(div);
-    			/*canvas_1_binding*/ ctx[9](null);
+    			/*canvas_1_binding*/ ctx[4](null);
     		}
     	};
 
@@ -923,6 +1011,8 @@ var app = (function () {
     }
 
     function instance$1($$self, $$props, $$invalidate) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('PDFPage', slots, []);
     	let { page } = $$props;
     	const dispatch = createEventDispatcher();
     	let canvas;
@@ -952,23 +1042,21 @@ var app = (function () {
     		window.removeEventListener("resize", measure);
     	});
 
-    	const writable_props = ["page"];
+    	const writable_props = ['page'];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<PDFPage> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<PDFPage> was created with unknown prop '${key}'`);
     	});
 
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("PDFPage", $$slots, []);
-
     	function canvas_1_binding($$value) {
-    		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(0, canvas = $$value);
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			canvas = $$value;
+    			$$invalidate(0, canvas);
     		});
     	}
 
-    	$$self.$set = $$props => {
-    		if ("page" in $$props) $$invalidate(3, page = $$props.page);
+    	$$self.$$set = $$props => {
+    		if ('page' in $$props) $$invalidate(3, page = $$props.page);
     	};
 
     	$$self.$capture_state = () => ({
@@ -987,30 +1075,19 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("page" in $$props) $$invalidate(3, page = $$props.page);
-    		if ("canvas" in $$props) $$invalidate(0, canvas = $$props.canvas);
-    		if ("width" in $$props) $$invalidate(1, width = $$props.width);
-    		if ("height" in $$props) $$invalidate(2, height = $$props.height);
-    		if ("clientWidth" in $$props) clientWidth = $$props.clientWidth;
-    		if ("mounted" in $$props) mounted = $$props.mounted;
+    		if ('page' in $$props) $$invalidate(3, page = $$props.page);
+    		if ('canvas' in $$props) $$invalidate(0, canvas = $$props.canvas);
+    		if ('width' in $$props) $$invalidate(1, width = $$props.width);
+    		if ('height' in $$props) $$invalidate(2, height = $$props.height);
+    		if ('clientWidth' in $$props) clientWidth = $$props.clientWidth;
+    		if ('mounted' in $$props) mounted = $$props.mounted;
     	};
 
     	if ($$props && "$$inject" in $$props) {
     		$$self.$inject_state($$props.$$inject);
     	}
 
-    	return [
-    		canvas,
-    		width,
-    		height,
-    		page,
-    		dispatch,
-    		clientWidth,
-    		mounted,
-    		measure,
-    		render,
-    		canvas_1_binding
-    	];
+    	return [canvas, width, height, page, canvas_1_binding];
     }
 
     class PDFPage extends SvelteComponentDev {
@@ -1028,7 +1105,7 @@ var app = (function () {
     		const { ctx } = this.$$;
     		const props = options.props || {};
 
-    		if (/*page*/ ctx[3] === undefined && !("page" in props)) {
+    		if (/*page*/ ctx[3] === undefined && !('page' in props)) {
     			console.warn("<PDFPage> was created without expected prop 'page'");
     		}
     	}
@@ -1273,7 +1350,7 @@ var app = (function () {
       return pdfjsLib.getDocument(url).promise;
     }
 
-    /* src\Image.svelte generated by Svelte v3.21.0 */
+    /* src\Image.svelte generated by Svelte v3.46.4 */
     const file_1 = "src\\Image.svelte";
 
     function create_fragment$2(ctx) {
@@ -1301,6 +1378,7 @@ var app = (function () {
     	let img_src_value;
     	let t8;
     	let canvas_1;
+    	let mounted;
     	let dispose;
 
     	const block = {
@@ -1328,51 +1406,51 @@ var app = (function () {
     			t8 = space();
     			canvas_1 = element("canvas");
     			attr_dev(div0, "data-direction", "left");
-    			attr_dev(div0, "class", "resize-border h-full w-1 left-0 top-0 border-l cursor-ew-resize svelte-1jzg05b");
-    			add_location(div0, file_1, 146, 4, 4302);
+    			attr_dev(div0, "class", "resize-border h-full w-1 left-0 top-0 border-l cursor-ew-resize svelte-i6z4ik");
+    			add_location(div0, file_1, 144, 4, 3529);
     			attr_dev(div1, "data-direction", "top");
-    			attr_dev(div1, "class", "resize-border w-full h-1 left-0 top-0 border-t cursor-ns-resize svelte-1jzg05b");
-    			add_location(div1, file_1, 149, 4, 4423);
+    			attr_dev(div1, "class", "resize-border w-full h-1 left-0 top-0 border-t cursor-ns-resize svelte-i6z4ik");
+    			add_location(div1, file_1, 147, 4, 3650);
     			attr_dev(div2, "data-direction", "bottom");
-    			attr_dev(div2, "class", "resize-border w-full h-1 left-0 bottom-0 border-b cursor-ns-resize svelte-1jzg05b");
-    			add_location(div2, file_1, 152, 4, 4543);
+    			attr_dev(div2, "class", "resize-border w-full h-1 left-0 bottom-0 border-b cursor-ns-resize svelte-i6z4ik");
+    			add_location(div2, file_1, 150, 4, 3770);
     			attr_dev(div3, "data-direction", "right");
-    			attr_dev(div3, "class", "resize-border h-full w-1 right-0 top-0 border-r cursor-ew-resize svelte-1jzg05b");
-    			add_location(div3, file_1, 155, 4, 4669);
+    			attr_dev(div3, "class", "resize-border h-full w-1 right-0 top-0 border-r cursor-ew-resize svelte-i6z4ik");
+    			add_location(div3, file_1, 153, 4, 3896);
     			attr_dev(div4, "data-direction", "left-top");
-    			attr_dev(div4, "class", "resize-corner left-0 top-0 cursor-nwse-resize transform\r\n      -translate-x-1/2 -translate-y-1/2 md:scale-25 svelte-1jzg05b");
-    			add_location(div4, file_1, 158, 4, 4792);
+    			attr_dev(div4, "class", "resize-corner left-0 top-0 cursor-nwse-resize transform -translate-x-1/2 -translate-y-1/2 md:scale-25 svelte-i6z4ik");
+    			add_location(div4, file_1, 156, 4, 4019);
     			attr_dev(div5, "data-direction", "right-top");
-    			attr_dev(div5, "class", "resize-corner right-0 top-0 cursor-nesw-resize transform\r\n      translate-x-1/2 -translate-y-1/2 md:scale-25 svelte-1jzg05b");
-    			add_location(div5, file_1, 162, 4, 4962);
+    			attr_dev(div5, "class", "resize-corner right-0 top-0 cursor-nesw-resize transform translate-x-1/2 -translate-y-1/2 md:scale-25 svelte-i6z4ik");
+    			add_location(div5, file_1, 160, 4, 4189);
     			attr_dev(div6, "data-direction", "left-bottom");
-    			attr_dev(div6, "class", "resize-corner left-0 bottom-0 cursor-nesw-resize transform\r\n      -translate-x-1/2 translate-y-1/2 md:scale-25 svelte-1jzg05b");
-    			add_location(div6, file_1, 166, 4, 5133);
+    			attr_dev(div6, "class", "resize-corner left-0 bottom-0 cursor-nesw-resize transform -translate-x-1/2 translate-y-1/2 md:scale-25 svelte-i6z4ik");
+    			add_location(div6, file_1, 164, 4, 4360);
     			attr_dev(div7, "data-direction", "right-bottom");
-    			attr_dev(div7, "class", "resize-corner right-0 bottom-0 cursor-nwse-resize transform\r\n      translate-x-1/2 translate-y-1/2 md:scale-25 svelte-1jzg05b");
-    			add_location(div7, file_1, 170, 4, 5308);
-    			attr_dev(div8, "class", "absolute w-full h-full cursor-grab svelte-1jzg05b");
-    			toggle_class(div8, "cursor-grabbing", /*operation*/ ctx[5] === "move");
+    			attr_dev(div7, "class", "resize-corner right-0 bottom-0 cursor-nwse-resize transform translate-x-1/2 translate-y-1/2 md:scale-25 svelte-i6z4ik");
+    			add_location(div7, file_1, 168, 4, 4535);
+    			attr_dev(div8, "class", "absolute w-full h-full cursor-grab svelte-i6z4ik");
+    			toggle_class(div8, "cursor-grabbing", /*operation*/ ctx[5] === 'move');
     			toggle_class(div8, "operation", /*operation*/ ctx[5]);
-    			add_location(div8, file_1, 138, 2, 4058);
+    			add_location(div8, file_1, 136, 2, 3285);
     			attr_dev(img, "class", "w-full h-full");
-    			if (img.src !== (img_src_value = "/delete.svg")) attr_dev(img, "src", img_src_value);
+    			if (!src_url_equal(img.src, img_src_value = "/delete.svg")) attr_dev(img, "src", img_src_value);
     			attr_dev(img, "alt", "delete object");
-    			add_location(img, file_1, 179, 4, 5669);
-    			attr_dev(div9, "class", "absolute left-0 top-0 right-0 w-12 h-12 m-auto rounded-full bg-white\r\n    cursor-pointer transform -translate-y-1/2 md:scale-25");
-    			add_location(div9, file_1, 175, 2, 5492);
+    			add_location(img, file_1, 177, 4, 4896);
+    			attr_dev(div9, "class", "absolute left-0 top-0 right-0 w-12 h-12 m-auto rounded-full bg-white cursor-pointer transform -translate-y-1/2 md:scale-25");
+    			add_location(div9, file_1, 173, 2, 4719);
     			attr_dev(canvas_1, "class", "w-full h-full");
-    			add_location(canvas_1, file_1, 181, 2, 5750);
+    			add_location(canvas_1, file_1, 179, 2, 4977);
     			attr_dev(div10, "class", "absolute left-0 top-0 select-none");
     			set_style(div10, "width", /*width*/ ctx[0] + /*dw*/ ctx[8] + "px");
     			set_style(div10, "height", /*height*/ ctx[1] + /*dh*/ ctx[9] + "px");
-    			set_style(div10, "transform", "translate(" + (/*x*/ ctx[2] + /*dx*/ ctx[6]) + "px,\r\n  " + (/*y*/ ctx[3] + /*dy*/ ctx[7]) + "px)");
-    			add_location(div10, file_1, 133, 0, 3894);
+    			set_style(div10, "transform", "translate(" + (/*x*/ ctx[2] + /*dx*/ ctx[6]) + "px, " + (/*y*/ ctx[3] + /*dy*/ ctx[7]) + "px)");
+    			add_location(div10, file_1, 131, 0, 3121);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			insert_dev(target, div10, anchor);
     			append_dev(div10, div8);
     			append_dev(div8, div0);
@@ -1395,20 +1473,23 @@ var app = (function () {
     			append_dev(div9, img);
     			append_dev(div10, t8);
     			append_dev(div10, canvas_1);
-    			/*canvas_1_binding*/ ctx[22](canvas_1);
-    			if (remount) run_all(dispose);
+    			/*canvas_1_binding*/ ctx[17](canvas_1);
 
-    			dispose = [
-    				action_destroyer(pannable_action = pannable.call(null, div8)),
-    				listen_dev(div8, "panstart", /*handlePanStart*/ ctx[12], false, false, false),
-    				listen_dev(div8, "panmove", /*handlePanMove*/ ctx[10], false, false, false),
-    				listen_dev(div8, "panend", /*handlePanEnd*/ ctx[11], false, false, false),
-    				listen_dev(div9, "click", /*onDelete*/ ctx[13], false, false, false)
-    			];
+    			if (!mounted) {
+    				dispose = [
+    					action_destroyer(pannable_action = pannable.call(null, div8)),
+    					listen_dev(div8, "panstart", /*handlePanStart*/ ctx[12], false, false, false),
+    					listen_dev(div8, "panmove", /*handlePanMove*/ ctx[10], false, false, false),
+    					listen_dev(div8, "panend", /*handlePanEnd*/ ctx[11], false, false, false),
+    					listen_dev(div9, "click", /*onDelete*/ ctx[13], false, false, false)
+    				];
+
+    				mounted = true;
+    			}
     		},
     		p: function update(ctx, [dirty]) {
     			if (dirty & /*operation*/ 32) {
-    				toggle_class(div8, "cursor-grabbing", /*operation*/ ctx[5] === "move");
+    				toggle_class(div8, "cursor-grabbing", /*operation*/ ctx[5] === 'move');
     			}
 
     			if (dirty & /*operation*/ 32) {
@@ -1424,14 +1505,15 @@ var app = (function () {
     			}
 
     			if (dirty & /*x, dx, y, dy*/ 204) {
-    				set_style(div10, "transform", "translate(" + (/*x*/ ctx[2] + /*dx*/ ctx[6]) + "px,\r\n  " + (/*y*/ ctx[3] + /*dy*/ ctx[7]) + "px)");
+    				set_style(div10, "transform", "translate(" + (/*x*/ ctx[2] + /*dx*/ ctx[6]) + "px, " + (/*y*/ ctx[3] + /*dy*/ ctx[7]) + "px)");
     			}
     		},
     		i: noop,
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(div10);
-    			/*canvas_1_binding*/ ctx[22](null);
+    			/*canvas_1_binding*/ ctx[17](null);
+    			mounted = false;
     			run_all(dispose);
     		}
     	};
@@ -1448,6 +1530,8 @@ var app = (function () {
     }
 
     function instance$2($$self, $$props, $$invalidate) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('Image', slots, []);
     	let { payload } = $$props;
     	let { file } = $$props;
     	let { width } = $$props;
@@ -1563,29 +1647,27 @@ var app = (function () {
     	}
 
     	onMount(render);
-    	const writable_props = ["payload", "file", "width", "height", "x", "y", "pageScale"];
+    	const writable_props = ['payload', 'file', 'width', 'height', 'x', 'y', 'pageScale'];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<Image> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<Image> was created with unknown prop '${key}'`);
     	});
 
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("Image", $$slots, []);
-
     	function canvas_1_binding($$value) {
-    		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(4, canvas = $$value);
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			canvas = $$value;
+    			$$invalidate(4, canvas);
     		});
     	}
 
-    	$$self.$set = $$props => {
-    		if ("payload" in $$props) $$invalidate(14, payload = $$props.payload);
-    		if ("file" in $$props) $$invalidate(15, file = $$props.file);
-    		if ("width" in $$props) $$invalidate(0, width = $$props.width);
-    		if ("height" in $$props) $$invalidate(1, height = $$props.height);
-    		if ("x" in $$props) $$invalidate(2, x = $$props.x);
-    		if ("y" in $$props) $$invalidate(3, y = $$props.y);
-    		if ("pageScale" in $$props) $$invalidate(16, pageScale = $$props.pageScale);
+    	$$self.$$set = $$props => {
+    		if ('payload' in $$props) $$invalidate(14, payload = $$props.payload);
+    		if ('file' in $$props) $$invalidate(15, file = $$props.file);
+    		if ('width' in $$props) $$invalidate(0, width = $$props.width);
+    		if ('height' in $$props) $$invalidate(1, height = $$props.height);
+    		if ('x' in $$props) $$invalidate(2, x = $$props.x);
+    		if ('y' in $$props) $$invalidate(3, y = $$props.y);
+    		if ('pageScale' in $$props) $$invalidate(16, pageScale = $$props.pageScale);
     	};
 
     	$$self.$capture_state = () => ({
@@ -1618,22 +1700,22 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("payload" in $$props) $$invalidate(14, payload = $$props.payload);
-    		if ("file" in $$props) $$invalidate(15, file = $$props.file);
-    		if ("width" in $$props) $$invalidate(0, width = $$props.width);
-    		if ("height" in $$props) $$invalidate(1, height = $$props.height);
-    		if ("x" in $$props) $$invalidate(2, x = $$props.x);
-    		if ("y" in $$props) $$invalidate(3, y = $$props.y);
-    		if ("pageScale" in $$props) $$invalidate(16, pageScale = $$props.pageScale);
-    		if ("startX" in $$props) startX = $$props.startX;
-    		if ("startY" in $$props) startY = $$props.startY;
-    		if ("canvas" in $$props) $$invalidate(4, canvas = $$props.canvas);
-    		if ("operation" in $$props) $$invalidate(5, operation = $$props.operation);
-    		if ("directions" in $$props) directions = $$props.directions;
-    		if ("dx" in $$props) $$invalidate(6, dx = $$props.dx);
-    		if ("dy" in $$props) $$invalidate(7, dy = $$props.dy);
-    		if ("dw" in $$props) $$invalidate(8, dw = $$props.dw);
-    		if ("dh" in $$props) $$invalidate(9, dh = $$props.dh);
+    		if ('payload' in $$props) $$invalidate(14, payload = $$props.payload);
+    		if ('file' in $$props) $$invalidate(15, file = $$props.file);
+    		if ('width' in $$props) $$invalidate(0, width = $$props.width);
+    		if ('height' in $$props) $$invalidate(1, height = $$props.height);
+    		if ('x' in $$props) $$invalidate(2, x = $$props.x);
+    		if ('y' in $$props) $$invalidate(3, y = $$props.y);
+    		if ('pageScale' in $$props) $$invalidate(16, pageScale = $$props.pageScale);
+    		if ('startX' in $$props) startX = $$props.startX;
+    		if ('startY' in $$props) startY = $$props.startY;
+    		if ('canvas' in $$props) $$invalidate(4, canvas = $$props.canvas);
+    		if ('operation' in $$props) $$invalidate(5, operation = $$props.operation);
+    		if ('directions' in $$props) directions = $$props.directions;
+    		if ('dx' in $$props) $$invalidate(6, dx = $$props.dx);
+    		if ('dy' in $$props) $$invalidate(7, dy = $$props.dy);
+    		if ('dw' in $$props) $$invalidate(8, dw = $$props.dw);
+    		if ('dh' in $$props) $$invalidate(9, dh = $$props.dh);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -1658,11 +1740,6 @@ var app = (function () {
     		payload,
     		file,
     		pageScale,
-    		startX,
-    		startY,
-    		directions,
-    		dispatch,
-    		render,
     		canvas_1_binding
     	];
     }
@@ -1691,27 +1768,27 @@ var app = (function () {
     		const { ctx } = this.$$;
     		const props = options.props || {};
 
-    		if (/*payload*/ ctx[14] === undefined && !("payload" in props)) {
+    		if (/*payload*/ ctx[14] === undefined && !('payload' in props)) {
     			console.warn("<Image> was created without expected prop 'payload'");
     		}
 
-    		if (/*file*/ ctx[15] === undefined && !("file" in props)) {
+    		if (/*file*/ ctx[15] === undefined && !('file' in props)) {
     			console.warn("<Image> was created without expected prop 'file'");
     		}
 
-    		if (/*width*/ ctx[0] === undefined && !("width" in props)) {
+    		if (/*width*/ ctx[0] === undefined && !('width' in props)) {
     			console.warn("<Image> was created without expected prop 'width'");
     		}
 
-    		if (/*height*/ ctx[1] === undefined && !("height" in props)) {
+    		if (/*height*/ ctx[1] === undefined && !('height' in props)) {
     			console.warn("<Image> was created without expected prop 'height'");
     		}
 
-    		if (/*x*/ ctx[2] === undefined && !("x" in props)) {
+    		if (/*x*/ ctx[2] === undefined && !('x' in props)) {
     			console.warn("<Image> was created without expected prop 'x'");
     		}
 
-    		if (/*y*/ ctx[3] === undefined && !("y" in props)) {
+    		if (/*y*/ ctx[3] === undefined && !('y' in props)) {
     			console.warn("<Image> was created without expected prop 'y'");
     		}
     	}
@@ -1773,14 +1850,14 @@ var app = (function () {
     	}
     }
 
-    /* src\Portal.svelte generated by Svelte v3.21.0 */
+    /* src\Portal.svelte generated by Svelte v3.46.4 */
 
     const file$1 = "src\\Portal.svelte";
 
     function create_fragment$3(ctx) {
     	let div;
     	let current;
-    	const default_slot_template = /*$$slots*/ ctx[2].default;
+    	const default_slot_template = /*#slots*/ ctx[2].default;
     	const default_slot = create_slot(default_slot_template, ctx, /*$$scope*/ ctx[1], null);
 
     	const block = {
@@ -1804,8 +1881,17 @@ var app = (function () {
     		},
     		p: function update(ctx, [dirty]) {
     			if (default_slot) {
-    				if (default_slot.p && dirty & /*$$scope*/ 2) {
-    					default_slot.p(get_slot_context(default_slot_template, ctx, /*$$scope*/ ctx[1], null), get_slot_changes(default_slot_template, /*$$scope*/ ctx[1], dirty, null));
+    				if (default_slot.p && (!current || dirty & /*$$scope*/ 2)) {
+    					update_slot_base(
+    						default_slot,
+    						default_slot_template,
+    						ctx,
+    						/*$$scope*/ ctx[1],
+    						!current
+    						? get_all_dirty_from_scope(/*$$scope*/ ctx[1])
+    						: get_slot_changes(default_slot_template, /*$$scope*/ ctx[1], dirty, null),
+    						null
+    					);
     				}
     			}
     		},
@@ -1837,30 +1923,30 @@ var app = (function () {
     }
 
     function instance$3($$self, $$props, $$invalidate) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('Portal', slots, ['default']);
     	let portal;
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<Portal> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<Portal> was created with unknown prop '${key}'`);
     	});
 
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("Portal", $$slots, ['default']);
-
     	function div_binding($$value) {
-    		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(0, portal = $$value);
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			portal = $$value;
+    			$$invalidate(0, portal);
     		});
     	}
 
-    	$$self.$set = $$props => {
-    		if ("$$scope" in $$props) $$invalidate(1, $$scope = $$props.$$scope);
+    	$$self.$$set = $$props => {
+    		if ('$$scope' in $$props) $$invalidate(1, $$scope = $$props.$$scope);
     	};
 
     	$$self.$capture_state = () => ({ portal });
 
     	$$self.$inject_state = $$props => {
-    		if ("portal" in $$props) $$invalidate(0, portal = $$props.portal);
+    		if ('portal' in $$props) $$invalidate(0, portal = $$props.portal);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -1873,7 +1959,7 @@ var app = (function () {
     		}
     	};
 
-    	return [portal, $$scope, $$slots, div_binding];
+    	return [portal, $$scope, slots, div_binding];
     }
 
     class Portal extends SvelteComponentDev {
@@ -1890,14 +1976,14 @@ var app = (function () {
     	}
     }
 
-    /* src\Toolbar.svelte generated by Svelte v3.21.0 */
+    /* src\Toolbar.svelte generated by Svelte v3.46.4 */
     const file$2 = "src\\Toolbar.svelte";
 
     // (5:0) <Portal>
     function create_default_slot(ctx) {
     	let div;
     	let current;
-    	const default_slot_template = /*$$slots*/ ctx[0].default;
+    	const default_slot_template = /*#slots*/ ctx[0].default;
     	const default_slot = create_slot(default_slot_template, ctx, /*$$scope*/ ctx[1], null);
 
     	const block = {
@@ -1918,8 +2004,17 @@ var app = (function () {
     		},
     		p: function update(ctx, dirty) {
     			if (default_slot) {
-    				if (default_slot.p && dirty & /*$$scope*/ 2) {
-    					default_slot.p(get_slot_context(default_slot_template, ctx, /*$$scope*/ ctx[1], null), get_slot_changes(default_slot_template, /*$$scope*/ ctx[1], dirty, null));
+    				if (default_slot.p && (!current || dirty & /*$$scope*/ 2)) {
+    					update_slot_base(
+    						default_slot,
+    						default_slot_template,
+    						ctx,
+    						/*$$scope*/ ctx[1],
+    						!current
+    						? get_all_dirty_from_scope(/*$$scope*/ ctx[1])
+    						: get_slot_changes(default_slot_template, /*$$scope*/ ctx[1], dirty, null),
+    						null
+    					);
     				}
     			}
     		},
@@ -1950,9 +2045,10 @@ var app = (function () {
     }
 
     function create_fragment$4(ctx) {
+    	let portal;
     	let current;
 
-    	const portal = new Portal({
+    	portal = new Portal({
     			props: {
     				$$slots: { default: [create_default_slot] },
     				$$scope: { ctx }
@@ -2006,21 +2102,20 @@ var app = (function () {
     }
 
     function instance$4($$self, $$props, $$invalidate) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('Toolbar', slots, ['default']);
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<Toolbar> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<Toolbar> was created with unknown prop '${key}'`);
     	});
 
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("Toolbar", $$slots, ['default']);
-
-    	$$self.$set = $$props => {
-    		if ("$$scope" in $$props) $$invalidate(1, $$scope = $$props.$$scope);
+    	$$self.$$set = $$props => {
+    		if ('$$scope' in $$props) $$invalidate(1, $$scope = $$props.$$scope);
     	};
 
     	$$self.$capture_state = () => ({ Portal });
-    	return [$$slots, $$scope];
+    	return [slots, $$scope];
     }
 
     class Toolbar extends SvelteComponentDev {
@@ -2068,7 +2163,7 @@ var app = (function () {
     }
     const noop$1 = () => {};
 
-    /* src\Text.svelte generated by Svelte v3.21.0 */
+    /* src\Text.svelte generated by Svelte v3.46.4 */
 
     const { Object: Object_1 } = globals;
     const file$3 = "src\\Text.svelte";
@@ -2079,11 +2174,12 @@ var app = (function () {
     	return child_ctx;
     }
 
-    // (184:0) {#if operation}
+    // (182:0) {#if operation}
     function create_if_block(ctx) {
+    	let toolbar;
     	let current;
 
-    	const toolbar = new Toolbar({
+    	toolbar = new Toolbar({
     			props: {
     				$$slots: { default: [create_default_slot$1] },
     				$$scope: { ctx }
@@ -2126,14 +2222,14 @@ var app = (function () {
     		block,
     		id: create_if_block.name,
     		type: "if",
-    		source: "(184:0) {#if operation}",
+    		source: "(182:0) {#if operation}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (220:12) {#each Families as family}
+    // (218:12) {#each Families as family}
     function create_each_block(ctx) {
     	let option;
     	let t_value = /*family*/ ctx[36] + "";
@@ -2146,7 +2242,7 @@ var app = (function () {
     			t = text(t_value);
     			option.__value = option_value_value = /*family*/ ctx[36];
     			option.value = option.__value;
-    			add_location(option, file$3, 220, 14, 6981);
+    			add_location(option, file$3, 218, 14, 6192);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, option, anchor);
@@ -2162,14 +2258,14 @@ var app = (function () {
     		block,
     		id: create_each_block.name,
     		type: "each",
-    		source: "(220:12) {#each Families as family}",
+    		source: "(218:12) {#each Families as family}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (185:2) <Toolbar>
+    // (183:2) <Toolbar>
     function create_default_slot$1(ctx) {
     	let div6;
     	let div0;
@@ -2199,6 +2295,7 @@ var app = (function () {
     	let img3;
     	let img3_src_value;
     	let tapout_action;
+    	let mounted;
     	let dispose;
     	let each_value = /*Families*/ ctx[9];
     	validate_each_argument(each_value);
@@ -2238,59 +2335,59 @@ var app = (function () {
     			t6 = space();
     			div5 = element("div");
     			img3 = element("img");
-    			if (img0.src !== (img0_src_value = "/line_height.svg")) attr_dev(img0, "src", img0_src_value);
+    			if (!src_url_equal(img0.src, img0_src_value = "/line_height.svg")) attr_dev(img0, "src", img0_src_value);
     			attr_dev(img0, "class", "w-6 mr-2");
     			attr_dev(img0, "alt", "Line height");
-    			add_location(img0, file$3, 193, 8, 6023);
+    			add_location(img0, file$3, 191, 8, 5234);
     			attr_dev(input0, "type", "number");
     			attr_dev(input0, "min", "1");
     			attr_dev(input0, "max", "10");
     			attr_dev(input0, "step", "0.1");
     			attr_dev(input0, "class", "h-6 w-12 text-center flex-shrink-0 rounded-sm");
-    			add_location(input0, file$3, 194, 8, 6098);
+    			add_location(input0, file$3, 192, 8, 5309);
     			attr_dev(div0, "class", "mr-2 flex items-center");
-    			add_location(div0, file$3, 192, 6, 5977);
-    			if (img1.src !== (img1_src_value = "/text.svg")) attr_dev(img1, "src", img1_src_value);
+    			add_location(div0, file$3, 190, 6, 5188);
+    			if (!src_url_equal(img1.src, img1_src_value = "/text.svg")) attr_dev(img1, "src", img1_src_value);
     			attr_dev(img1, "class", "w-6 mr-2");
     			attr_dev(img1, "alt", "Font size");
-    			add_location(img1, file$3, 203, 8, 6362);
+    			add_location(img1, file$3, 201, 8, 5573);
     			attr_dev(input1, "type", "number");
     			attr_dev(input1, "min", "12");
     			attr_dev(input1, "max", "120");
     			attr_dev(input1, "step", "1");
     			attr_dev(input1, "class", "h-6 w-12 text-center flex-shrink-0 rounded-sm");
-    			add_location(input1, file$3, 204, 8, 6428);
+    			add_location(input1, file$3, 202, 8, 5639);
     			attr_dev(div1, "class", "mr-2 flex items-center");
-    			add_location(div1, file$3, 202, 6, 6316);
-    			if (img2.src !== (img2_src_value = "/text-family.svg")) attr_dev(img2, "src", img2_src_value);
+    			add_location(div1, file$3, 200, 6, 5527);
+    			if (!src_url_equal(img2.src, img2_src_value = "/text-family.svg")) attr_dev(img2, "src", img2_src_value);
     			attr_dev(img2, "class", "w-4 mr-2");
     			attr_dev(img2, "alt", "Font family");
-    			add_location(img2, file$3, 213, 8, 6686);
-    			attr_dev(select, "class", "font-family svelte-wywmrv");
-    			if (/*_fontFamily*/ ctx[5] === void 0) add_render_callback(() => /*select_change_handler*/ ctx[34].call(select));
-    			add_location(select, file$3, 215, 10, 6808);
+    			add_location(img2, file$3, 211, 8, 5897);
+    			attr_dev(select, "class", "font-family svelte-14i4sqe");
+    			if (/*_fontFamily*/ ctx[5] === void 0) add_render_callback(() => /*select_change_handler*/ ctx[28].call(select));
+    			add_location(select, file$3, 213, 10, 6019);
     			attr_dev(path, "d", "M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757\r\n                6.586 4.343 8z");
-    			add_location(path, file$3, 230, 14, 7362);
+    			add_location(path, file$3, 228, 14, 6573);
     			attr_dev(svg, "class", "fill-current h-4 w-4");
     			attr_dev(svg, "xmlns", "http://www.w3.org/2000/svg");
     			attr_dev(svg, "viewBox", "0 0 20 20");
-    			add_location(svg, file$3, 226, 12, 7212);
-    			attr_dev(div2, "class", "pointer-events-none absolute inset-y-0 right-0 flex\r\n            items-center px-2 text-gray-700");
-    			add_location(div2, file$3, 223, 10, 7075);
+    			add_location(svg, file$3, 224, 12, 6423);
+    			attr_dev(div2, "class", "pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-700");
+    			add_location(div2, file$3, 221, 10, 6286);
     			attr_dev(div3, "class", "relative w-32 md:w-40");
-    			add_location(div3, file$3, 214, 8, 6761);
+    			add_location(div3, file$3, 212, 8, 5972);
     			attr_dev(div4, "class", "mr-2 flex items-center");
-    			add_location(div4, file$3, 212, 6, 6640);
+    			add_location(div4, file$3, 210, 6, 5851);
     			attr_dev(img3, "class", "w-full h-full");
-    			if (img3.src !== (img3_src_value = "/delete.svg")) attr_dev(img3, "src", img3_src_value);
+    			if (!src_url_equal(img3.src, img3_src_value = "/delete.svg")) attr_dev(img3, "src", img3_src_value);
     			attr_dev(img3, "alt", "delete object");
-    			add_location(img3, file$3, 240, 8, 7665);
+    			add_location(img3, file$3, 238, 8, 6876);
     			attr_dev(div5, "class", "w-5 h-5 rounded-full bg-white cursor-pointer");
-    			add_location(div5, file$3, 237, 6, 7559);
-    			attr_dev(div6, "class", "h-full flex justify-center items-center bg-gray-300 border-b\r\n      border-gray-400");
-    			add_location(div6, file$3, 185, 4, 5748);
+    			add_location(div5, file$3, 235, 6, 6770);
+    			attr_dev(div6, "class", "h-full flex justify-center items-center bg-gray-300 border-b border-gray-400");
+    			add_location(div6, file$3, 183, 4, 4959);
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			insert_dev(target, div6, anchor);
     			append_dev(div6, div0);
     			append_dev(div0, img0);
@@ -2322,19 +2419,22 @@ var app = (function () {
     			append_dev(div6, t6);
     			append_dev(div6, div5);
     			append_dev(div5, img3);
-    			if (remount) run_all(dispose);
 
-    			dispose = [
-    				listen_dev(input0, "input", /*input0_input_handler*/ ctx[32]),
-    				listen_dev(input1, "input", /*input1_input_handler*/ ctx[33]),
-    				listen_dev(select, "change", /*select_change_handler*/ ctx[34]),
-    				listen_dev(select, "change", /*onChangeFont*/ ctx[19], false, false, false),
-    				listen_dev(div5, "click", /*onDelete*/ ctx[20], false, false, false),
-    				action_destroyer(tapout_action = tapout.call(null, div6)),
-    				listen_dev(div6, "tapout", /*onBlurTool*/ ctx[18], false, false, false),
-    				listen_dev(div6, "mousedown", /*onFocusTool*/ ctx[17], false, false, false),
-    				listen_dev(div6, "touchstart", /*onFocusTool*/ ctx[17], { passive: true }, false, false)
-    			];
+    			if (!mounted) {
+    				dispose = [
+    					listen_dev(input0, "input", /*input0_input_handler*/ ctx[26]),
+    					listen_dev(input1, "input", /*input1_input_handler*/ ctx[27]),
+    					listen_dev(select, "change", /*select_change_handler*/ ctx[28]),
+    					listen_dev(select, "change", /*onChangeFont*/ ctx[19], false, false, false),
+    					listen_dev(div5, "click", /*onDelete*/ ctx[20], false, false, false),
+    					action_destroyer(tapout_action = tapout.call(null, div6)),
+    					listen_dev(div6, "tapout", /*onBlurTool*/ ctx[18], false, false, false),
+    					listen_dev(div6, "mousedown", /*onFocusTool*/ ctx[17], false, false, false),
+    					listen_dev(div6, "touchstart", /*onFocusTool*/ ctx[17], { passive: true }, false, false)
+    				];
+
+    				mounted = true;
+    			}
     		},
     		p: function update(ctx, dirty) {
     			if (dirty[0] & /*_lineHeight*/ 16 && to_number(input0.value) !== /*_lineHeight*/ ctx[4]) {
@@ -2369,13 +2469,14 @@ var app = (function () {
     				each_blocks.length = each_value.length;
     			}
 
-    			if (dirty[0] & /*_fontFamily*/ 32) {
+    			if (dirty[0] & /*_fontFamily, Families*/ 544) {
     				select_option(select, /*_fontFamily*/ ctx[5]);
     			}
     		},
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(div6);
     			destroy_each(each_blocks, detaching);
+    			mounted = false;
     			run_all(dispose);
     		}
     	};
@@ -2384,7 +2485,7 @@ var app = (function () {
     		block,
     		id: create_default_slot$1.name,
     		type: "slot",
-    		source: "(185:2) <Toolbar>",
+    		source: "(183:2) <Toolbar>",
     		ctx
     	});
 
@@ -2400,6 +2501,7 @@ var app = (function () {
     	let div1;
     	let tapout_action;
     	let current;
+    	let mounted;
     	let dispose;
     	let if_block = /*operation*/ ctx[8] && create_if_block(ctx);
 
@@ -2411,11 +2513,11 @@ var app = (function () {
     			div0 = element("div");
     			t1 = space();
     			div1 = element("div");
-    			attr_dev(div0, "class", "absolute w-full h-full cursor-grab border border-dotted\r\n    border-gray-500 svelte-wywmrv");
+    			attr_dev(div0, "class", "absolute w-full h-full cursor-grab border border-dotted border-gray-500 svelte-14i4sqe");
     			toggle_class(div0, "cursor-grab", !/*operation*/ ctx[8]);
-    			toggle_class(div0, "cursor-grabbing", /*operation*/ ctx[8] === "move");
-    			toggle_class(div0, "editing", ["edit", "tool"].includes(/*operation*/ ctx[8]));
-    			add_location(div0, file$3, 250, 2, 7928);
+    			toggle_class(div0, "cursor-grabbing", /*operation*/ ctx[8] === 'move');
+    			toggle_class(div0, "editing", ['edit', 'tool'].includes(/*operation*/ ctx[8]));
+    			add_location(div0, file$3, 248, 2, 7139);
     			attr_dev(div1, "contenteditable", "true");
     			attr_dev(div1, "spellcheck", "false");
     			attr_dev(div1, "class", "outline-none whitespace-no-wrap");
@@ -2423,36 +2525,39 @@ var app = (function () {
     			set_style(div1, "font-family", "'" + /*_fontFamily*/ ctx[5] + "', serif");
     			set_style(div1, "line-height", /*_lineHeight*/ ctx[4]);
     			set_style(div1, "-webkit-user-select", "text");
-    			add_location(div1, file$3, 260, 2, 8287);
+    			add_location(div1, file$3, 258, 2, 7498);
     			attr_dev(div2, "class", "absolute left-0 top-0 select-none");
     			set_style(div2, "transform", "translate(" + (/*x*/ ctx[0] + /*dx*/ ctx[6]) + "px, " + (/*y*/ ctx[1] + /*dy*/ ctx[7]) + "px)");
-    			add_location(div2, file$3, 245, 0, 7781);
+    			add_location(div2, file$3, 243, 0, 6992);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			if (if_block) if_block.m(target, anchor);
     			insert_dev(target, t0, anchor);
     			insert_dev(target, div2, anchor);
     			append_dev(div2, div0);
     			append_dev(div2, t1);
     			append_dev(div2, div1);
-    			/*div1_binding*/ ctx[35](div1);
+    			/*div1_binding*/ ctx[29](div1);
     			current = true;
-    			if (remount) run_all(dispose);
 
-    			dispose = [
-    				action_destroyer(pannable_action = pannable.call(null, div0)),
-    				listen_dev(div0, "panstart", /*handlePanStart*/ ctx[12], false, false, false),
-    				listen_dev(div0, "panmove", /*handlePanMove*/ ctx[10], false, false, false),
-    				listen_dev(div0, "panend", /*handlePanEnd*/ ctx[11], false, false, false),
-    				listen_dev(div1, "focus", /*onFocus*/ ctx[13], false, false, false),
-    				listen_dev(div1, "keydown", /*onKeydown*/ ctx[16], false, false, false),
-    				listen_dev(div1, "paste", prevent_default(/*onPaste*/ ctx[15]), false, true, false),
-    				action_destroyer(tapout_action = tapout.call(null, div2)),
-    				listen_dev(div2, "tapout", /*onBlur*/ ctx[14], false, false, false)
-    			];
+    			if (!mounted) {
+    				dispose = [
+    					action_destroyer(pannable_action = pannable.call(null, div0)),
+    					listen_dev(div0, "panstart", /*handlePanStart*/ ctx[12], false, false, false),
+    					listen_dev(div0, "panmove", /*handlePanMove*/ ctx[10], false, false, false),
+    					listen_dev(div0, "panend", /*handlePanEnd*/ ctx[11], false, false, false),
+    					listen_dev(div1, "focus", /*onFocus*/ ctx[13], false, false, false),
+    					listen_dev(div1, "keydown", /*onKeydown*/ ctx[16], false, false, false),
+    					listen_dev(div1, "paste", prevent_default(/*onPaste*/ ctx[15]), false, true, false),
+    					action_destroyer(tapout_action = tapout.call(null, div2)),
+    					listen_dev(div2, "tapout", /*onBlur*/ ctx[14], false, false, false)
+    				];
+
+    				mounted = true;
+    			}
     		},
     		p: function update(ctx, dirty) {
     			if (/*operation*/ ctx[8]) {
@@ -2483,11 +2588,11 @@ var app = (function () {
     			}
 
     			if (dirty[0] & /*operation*/ 256) {
-    				toggle_class(div0, "cursor-grabbing", /*operation*/ ctx[8] === "move");
+    				toggle_class(div0, "cursor-grabbing", /*operation*/ ctx[8] === 'move');
     			}
 
     			if (dirty[0] & /*operation*/ 256) {
-    				toggle_class(div0, "editing", ["edit", "tool"].includes(/*operation*/ ctx[8]));
+    				toggle_class(div0, "editing", ['edit', 'tool'].includes(/*operation*/ ctx[8]));
     			}
 
     			if (!current || dirty[0] & /*_size*/ 8) {
@@ -2519,7 +2624,8 @@ var app = (function () {
     			if (if_block) if_block.d(detaching);
     			if (detaching) detach_dev(t0);
     			if (detaching) detach_dev(div2);
-    			/*div1_binding*/ ctx[35](null);
+    			/*div1_binding*/ ctx[29](null);
+    			mounted = false;
     			run_all(dispose);
     		}
     	};
@@ -2536,6 +2642,8 @@ var app = (function () {
     }
 
     function instance$5($$self, $$props, $$invalidate) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('Text', slots, []);
     	let { size } = $$props;
     	let { text } = $$props;
     	let { lineHeight } = $$props;
@@ -2700,14 +2808,11 @@ var app = (function () {
     	}
 
     	onMount(render);
-    	const writable_props = ["size", "text", "lineHeight", "x", "y", "fontFamily", "pageScale"];
+    	const writable_props = ['size', 'text', 'lineHeight', 'x', 'y', 'fontFamily', 'pageScale'];
 
     	Object_1.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<Text> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<Text> was created with unknown prop '${key}'`);
     	});
-
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("Text", $$slots, []);
 
     	function input0_input_handler() {
     		_lineHeight = to_number(this.value);
@@ -2726,19 +2831,20 @@ var app = (function () {
     	}
 
     	function div1_binding($$value) {
-    		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(2, editable = $$value);
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			editable = $$value;
+    			$$invalidate(2, editable);
     		});
     	}
 
-    	$$self.$set = $$props => {
-    		if ("size" in $$props) $$invalidate(21, size = $$props.size);
-    		if ("text" in $$props) $$invalidate(22, text = $$props.text);
-    		if ("lineHeight" in $$props) $$invalidate(23, lineHeight = $$props.lineHeight);
-    		if ("x" in $$props) $$invalidate(0, x = $$props.x);
-    		if ("y" in $$props) $$invalidate(1, y = $$props.y);
-    		if ("fontFamily" in $$props) $$invalidate(24, fontFamily = $$props.fontFamily);
-    		if ("pageScale" in $$props) $$invalidate(25, pageScale = $$props.pageScale);
+    	$$self.$$set = $$props => {
+    		if ('size' in $$props) $$invalidate(21, size = $$props.size);
+    		if ('text' in $$props) $$invalidate(22, text = $$props.text);
+    		if ('lineHeight' in $$props) $$invalidate(23, lineHeight = $$props.lineHeight);
+    		if ('x' in $$props) $$invalidate(0, x = $$props.x);
+    		if ('y' in $$props) $$invalidate(1, y = $$props.y);
+    		if ('fontFamily' in $$props) $$invalidate(24, fontFamily = $$props.fontFamily);
+    		if ('pageScale' in $$props) $$invalidate(25, pageScale = $$props.pageScale);
     	};
 
     	$$self.$capture_state = () => ({
@@ -2784,22 +2890,22 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("size" in $$props) $$invalidate(21, size = $$props.size);
-    		if ("text" in $$props) $$invalidate(22, text = $$props.text);
-    		if ("lineHeight" in $$props) $$invalidate(23, lineHeight = $$props.lineHeight);
-    		if ("x" in $$props) $$invalidate(0, x = $$props.x);
-    		if ("y" in $$props) $$invalidate(1, y = $$props.y);
-    		if ("fontFamily" in $$props) $$invalidate(24, fontFamily = $$props.fontFamily);
-    		if ("pageScale" in $$props) $$invalidate(25, pageScale = $$props.pageScale);
-    		if ("startX" in $$props) startX = $$props.startX;
-    		if ("startY" in $$props) startY = $$props.startY;
-    		if ("editable" in $$props) $$invalidate(2, editable = $$props.editable);
-    		if ("_size" in $$props) $$invalidate(3, _size = $$props._size);
-    		if ("_lineHeight" in $$props) $$invalidate(4, _lineHeight = $$props._lineHeight);
-    		if ("_fontFamily" in $$props) $$invalidate(5, _fontFamily = $$props._fontFamily);
-    		if ("dx" in $$props) $$invalidate(6, dx = $$props.dx);
-    		if ("dy" in $$props) $$invalidate(7, dy = $$props.dy);
-    		if ("operation" in $$props) $$invalidate(8, operation = $$props.operation);
+    		if ('size' in $$props) $$invalidate(21, size = $$props.size);
+    		if ('text' in $$props) $$invalidate(22, text = $$props.text);
+    		if ('lineHeight' in $$props) $$invalidate(23, lineHeight = $$props.lineHeight);
+    		if ('x' in $$props) $$invalidate(0, x = $$props.x);
+    		if ('y' in $$props) $$invalidate(1, y = $$props.y);
+    		if ('fontFamily' in $$props) $$invalidate(24, fontFamily = $$props.fontFamily);
+    		if ('pageScale' in $$props) $$invalidate(25, pageScale = $$props.pageScale);
+    		if ('startX' in $$props) startX = $$props.startX;
+    		if ('startY' in $$props) startY = $$props.startY;
+    		if ('editable' in $$props) $$invalidate(2, editable = $$props.editable);
+    		if ('_size' in $$props) $$invalidate(3, _size = $$props._size);
+    		if ('_lineHeight' in $$props) $$invalidate(4, _lineHeight = $$props._lineHeight);
+    		if ('_fontFamily' in $$props) $$invalidate(5, _fontFamily = $$props._fontFamily);
+    		if ('dx' in $$props) $$invalidate(6, dx = $$props.dx);
+    		if ('dy' in $$props) $$invalidate(7, dy = $$props.dy);
+    		if ('operation' in $$props) $$invalidate(8, operation = $$props.operation);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -2833,12 +2939,6 @@ var app = (function () {
     		lineHeight,
     		fontFamily,
     		pageScale,
-    		startX,
-    		startY,
-    		dispatch,
-    		sanitize,
-    		render,
-    		extractLines,
     		input0_input_handler,
     		input1_input_handler,
     		select_change_handler,
@@ -2865,6 +2965,7 @@ var app = (function () {
     				fontFamily: 24,
     				pageScale: 25
     			},
+    			null,
     			[-1, -1]
     		);
 
@@ -2878,27 +2979,27 @@ var app = (function () {
     		const { ctx } = this.$$;
     		const props = options.props || {};
 
-    		if (/*size*/ ctx[21] === undefined && !("size" in props)) {
+    		if (/*size*/ ctx[21] === undefined && !('size' in props)) {
     			console.warn("<Text> was created without expected prop 'size'");
     		}
 
-    		if (/*text*/ ctx[22] === undefined && !("text" in props)) {
+    		if (/*text*/ ctx[22] === undefined && !('text' in props)) {
     			console.warn("<Text> was created without expected prop 'text'");
     		}
 
-    		if (/*lineHeight*/ ctx[23] === undefined && !("lineHeight" in props)) {
+    		if (/*lineHeight*/ ctx[23] === undefined && !('lineHeight' in props)) {
     			console.warn("<Text> was created without expected prop 'lineHeight'");
     		}
 
-    		if (/*x*/ ctx[0] === undefined && !("x" in props)) {
+    		if (/*x*/ ctx[0] === undefined && !('x' in props)) {
     			console.warn("<Text> was created without expected prop 'x'");
     		}
 
-    		if (/*y*/ ctx[1] === undefined && !("y" in props)) {
+    		if (/*y*/ ctx[1] === undefined && !('y' in props)) {
     			console.warn("<Text> was created without expected prop 'y'");
     		}
 
-    		if (/*fontFamily*/ ctx[24] === undefined && !("fontFamily" in props)) {
+    		if (/*fontFamily*/ ctx[24] === undefined && !('fontFamily' in props)) {
     			console.warn("<Text> was created without expected prop 'fontFamily'");
     		}
     	}
@@ -2960,7 +3061,7 @@ var app = (function () {
     	}
     }
 
-    /* src\Drawing.svelte generated by Svelte v3.21.0 */
+    /* src\Drawing.svelte generated by Svelte v3.46.4 */
     const file$4 = "src\\Drawing.svelte";
 
     function create_fragment$6(ctx) {
@@ -2977,6 +3078,7 @@ var app = (function () {
     	let t2;
     	let svg_1;
     	let path_1;
+    	let mounted;
     	let dispose;
 
     	const block = {
@@ -2993,41 +3095,41 @@ var app = (function () {
     			svg_1 = svg_element("svg");
     			path_1 = svg_element("path");
     			attr_dev(div0, "data-direction", "left-top");
-    			attr_dev(div0, "class", "absolute left-0 top-0 w-10 h-10 bg-green-400 rounded-full\r\n      cursor-nwse-resize transform -translate-x-1/2 -translate-y-1/2 md:scale-25");
-    			add_location(div0, file$4, 103, 4, 3000);
+    			attr_dev(div0, "class", "absolute left-0 top-0 w-10 h-10 bg-green-400 rounded-full cursor-nwse-resize transform -translate-x-1/2 -translate-y-1/2 md:scale-25");
+    			add_location(div0, file$4, 101, 4, 2659);
     			attr_dev(div1, "data-direction", "right-bottom");
-    			attr_dev(div1, "class", "absolute right-0 bottom-0 w-10 h-10 bg-green-400 rounded-full\r\n      cursor-nwse-resize transform translate-x-1/2 translate-y-1/2 md:scale-25");
-    			add_location(div1, file$4, 107, 4, 3201);
-    			attr_dev(div2, "class", "absolute w-full h-full cursor-grab border border-gray-400\r\n    border-dashed svelte-tm4r3p");
-    			toggle_class(div2, "cursor-grabbing", /*operation*/ ctx[5] === "move");
+    			attr_dev(div1, "class", "absolute right-0 bottom-0 w-10 h-10 bg-green-400 rounded-full cursor-nwse-resize transform translate-x-1/2 translate-y-1/2 md:scale-25");
+    			add_location(div1, file$4, 105, 4, 2860);
+    			attr_dev(div2, "class", "absolute w-full h-full cursor-grab border border-gray-400 border-dashed svelte-sf1zqb");
+    			toggle_class(div2, "cursor-grabbing", /*operation*/ ctx[5] === 'move');
     			toggle_class(div2, "operation", /*operation*/ ctx[5]);
-    			add_location(div2, file$4, 94, 2, 2714);
+    			add_location(div2, file$4, 92, 2, 2373);
     			attr_dev(img, "class", "w-full h-full");
-    			if (img.src !== (img_src_value = "/delete.svg")) attr_dev(img, "src", img_src_value);
+    			if (!src_url_equal(img.src, img_src_value = "/delete.svg")) attr_dev(img, "src", img_src_value);
     			attr_dev(img, "alt", "delete object");
-    			add_location(img, file$4, 116, 4, 3593);
-    			attr_dev(div3, "class", "absolute left-0 top-0 right-0 w-12 h-12 m-auto rounded-full bg-white\r\n    cursor-pointer transform -translate-y-1/2 md:scale-25");
-    			add_location(div3, file$4, 112, 2, 3416);
+    			add_location(img, file$4, 114, 4, 3252);
+    			attr_dev(div3, "class", "absolute left-0 top-0 right-0 w-12 h-12 m-auto rounded-full bg-white cursor-pointer transform -translate-y-1/2 md:scale-25");
+    			add_location(div3, file$4, 110, 2, 3075);
     			attr_dev(path_1, "stroke-width", "5");
     			attr_dev(path_1, "stroke-linejoin", "round");
     			attr_dev(path_1, "stroke-linecap", "round");
     			attr_dev(path_1, "stroke", "black");
     			attr_dev(path_1, "fill", "none");
     			attr_dev(path_1, "d", /*path*/ ctx[3]);
-    			add_location(path_1, file$4, 119, 4, 3728);
+    			add_location(path_1, file$4, 117, 4, 3387);
     			attr_dev(svg_1, "width", "100%");
     			attr_dev(svg_1, "height", "100%");
-    			add_location(svg_1, file$4, 118, 2, 3674);
+    			add_location(svg_1, file$4, 116, 2, 3333);
     			attr_dev(div4, "class", "absolute left-0 top-0 select-none");
     			set_style(div4, "width", /*width*/ ctx[0] + /*dw*/ ctx[8] + "px");
     			set_style(div4, "height", (/*width*/ ctx[0] + /*dw*/ ctx[8]) / /*ratio*/ ctx[9] + "px");
     			set_style(div4, "transform", "translate(" + (/*x*/ ctx[1] + /*dx*/ ctx[6]) + "px, " + (/*y*/ ctx[2] + /*dy*/ ctx[7]) + "px)");
-    			add_location(div4, file$4, 90, 0, 2543);
+    			add_location(div4, file$4, 88, 0, 2202);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			insert_dev(target, div4, anchor);
     			append_dev(div4, div2);
     			append_dev(div2, div0);
@@ -3039,20 +3141,23 @@ var app = (function () {
     			append_dev(div4, t2);
     			append_dev(div4, svg_1);
     			append_dev(svg_1, path_1);
-    			/*svg_1_binding*/ ctx[22](svg_1);
-    			if (remount) run_all(dispose);
+    			/*svg_1_binding*/ ctx[17](svg_1);
 
-    			dispose = [
-    				action_destroyer(pannable_action = pannable.call(null, div2)),
-    				listen_dev(div2, "panstart", /*handlePanStart*/ ctx[12], false, false, false),
-    				listen_dev(div2, "panmove", /*handlePanMove*/ ctx[10], false, false, false),
-    				listen_dev(div2, "panend", /*handlePanEnd*/ ctx[11], false, false, false),
-    				listen_dev(div3, "click", /*onDelete*/ ctx[13], false, false, false)
-    			];
+    			if (!mounted) {
+    				dispose = [
+    					action_destroyer(pannable_action = pannable.call(null, div2)),
+    					listen_dev(div2, "panstart", /*handlePanStart*/ ctx[12], false, false, false),
+    					listen_dev(div2, "panmove", /*handlePanMove*/ ctx[10], false, false, false),
+    					listen_dev(div2, "panend", /*handlePanEnd*/ ctx[11], false, false, false),
+    					listen_dev(div3, "click", /*onDelete*/ ctx[13], false, false, false)
+    				];
+
+    				mounted = true;
+    			}
     		},
     		p: function update(ctx, [dirty]) {
     			if (dirty & /*operation*/ 32) {
-    				toggle_class(div2, "cursor-grabbing", /*operation*/ ctx[5] === "move");
+    				toggle_class(div2, "cursor-grabbing", /*operation*/ ctx[5] === 'move');
     			}
 
     			if (dirty & /*operation*/ 32) {
@@ -3079,7 +3184,8 @@ var app = (function () {
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(div4);
-    			/*svg_1_binding*/ ctx[22](null);
+    			/*svg_1_binding*/ ctx[17](null);
+    			mounted = false;
     			run_all(dispose);
     		}
     	};
@@ -3096,6 +3202,8 @@ var app = (function () {
     }
 
     function instance$6($$self, $$props, $$invalidate) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('Drawing', slots, []);
     	let { originWidth } = $$props;
     	let { originHeight } = $$props;
     	let { width } = $$props;
@@ -3181,29 +3289,27 @@ var app = (function () {
     	}
 
     	onMount(render);
-    	const writable_props = ["originWidth", "originHeight", "width", "x", "y", "pageScale", "path"];
+    	const writable_props = ['originWidth', 'originHeight', 'width', 'x', 'y', 'pageScale', 'path'];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<Drawing> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<Drawing> was created with unknown prop '${key}'`);
     	});
 
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("Drawing", $$slots, []);
-
     	function svg_1_binding($$value) {
-    		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(4, svg = $$value);
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			svg = $$value;
+    			$$invalidate(4, svg);
     		});
     	}
 
-    	$$self.$set = $$props => {
-    		if ("originWidth" in $$props) $$invalidate(14, originWidth = $$props.originWidth);
-    		if ("originHeight" in $$props) $$invalidate(15, originHeight = $$props.originHeight);
-    		if ("width" in $$props) $$invalidate(0, width = $$props.width);
-    		if ("x" in $$props) $$invalidate(1, x = $$props.x);
-    		if ("y" in $$props) $$invalidate(2, y = $$props.y);
-    		if ("pageScale" in $$props) $$invalidate(16, pageScale = $$props.pageScale);
-    		if ("path" in $$props) $$invalidate(3, path = $$props.path);
+    	$$self.$$set = $$props => {
+    		if ('originWidth' in $$props) $$invalidate(14, originWidth = $$props.originWidth);
+    		if ('originHeight' in $$props) $$invalidate(15, originHeight = $$props.originHeight);
+    		if ('width' in $$props) $$invalidate(0, width = $$props.width);
+    		if ('x' in $$props) $$invalidate(1, x = $$props.x);
+    		if ('y' in $$props) $$invalidate(2, y = $$props.y);
+    		if ('pageScale' in $$props) $$invalidate(16, pageScale = $$props.pageScale);
+    		if ('path' in $$props) $$invalidate(3, path = $$props.path);
     	};
 
     	$$self.$capture_state = () => ({
@@ -3236,21 +3342,21 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("originWidth" in $$props) $$invalidate(14, originWidth = $$props.originWidth);
-    		if ("originHeight" in $$props) $$invalidate(15, originHeight = $$props.originHeight);
-    		if ("width" in $$props) $$invalidate(0, width = $$props.width);
-    		if ("x" in $$props) $$invalidate(1, x = $$props.x);
-    		if ("y" in $$props) $$invalidate(2, y = $$props.y);
-    		if ("pageScale" in $$props) $$invalidate(16, pageScale = $$props.pageScale);
-    		if ("path" in $$props) $$invalidate(3, path = $$props.path);
-    		if ("startX" in $$props) startX = $$props.startX;
-    		if ("startY" in $$props) startY = $$props.startY;
-    		if ("svg" in $$props) $$invalidate(4, svg = $$props.svg);
-    		if ("operation" in $$props) $$invalidate(5, operation = $$props.operation);
-    		if ("dx" in $$props) $$invalidate(6, dx = $$props.dx);
-    		if ("dy" in $$props) $$invalidate(7, dy = $$props.dy);
-    		if ("dw" in $$props) $$invalidate(8, dw = $$props.dw);
-    		if ("direction" in $$props) direction = $$props.direction;
+    		if ('originWidth' in $$props) $$invalidate(14, originWidth = $$props.originWidth);
+    		if ('originHeight' in $$props) $$invalidate(15, originHeight = $$props.originHeight);
+    		if ('width' in $$props) $$invalidate(0, width = $$props.width);
+    		if ('x' in $$props) $$invalidate(1, x = $$props.x);
+    		if ('y' in $$props) $$invalidate(2, y = $$props.y);
+    		if ('pageScale' in $$props) $$invalidate(16, pageScale = $$props.pageScale);
+    		if ('path' in $$props) $$invalidate(3, path = $$props.path);
+    		if ('startX' in $$props) startX = $$props.startX;
+    		if ('startY' in $$props) startY = $$props.startY;
+    		if ('svg' in $$props) $$invalidate(4, svg = $$props.svg);
+    		if ('operation' in $$props) $$invalidate(5, operation = $$props.operation);
+    		if ('dx' in $$props) $$invalidate(6, dx = $$props.dx);
+    		if ('dy' in $$props) $$invalidate(7, dy = $$props.dy);
+    		if ('dw' in $$props) $$invalidate(8, dw = $$props.dw);
+    		if ('direction' in $$props) direction = $$props.direction;
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -3275,11 +3381,6 @@ var app = (function () {
     		originWidth,
     		originHeight,
     		pageScale,
-    		startX,
-    		startY,
-    		direction,
-    		dispatch,
-    		render,
     		svg_1_binding
     	];
     }
@@ -3308,27 +3409,27 @@ var app = (function () {
     		const { ctx } = this.$$;
     		const props = options.props || {};
 
-    		if (/*originWidth*/ ctx[14] === undefined && !("originWidth" in props)) {
+    		if (/*originWidth*/ ctx[14] === undefined && !('originWidth' in props)) {
     			console.warn("<Drawing> was created without expected prop 'originWidth'");
     		}
 
-    		if (/*originHeight*/ ctx[15] === undefined && !("originHeight" in props)) {
+    		if (/*originHeight*/ ctx[15] === undefined && !('originHeight' in props)) {
     			console.warn("<Drawing> was created without expected prop 'originHeight'");
     		}
 
-    		if (/*width*/ ctx[0] === undefined && !("width" in props)) {
+    		if (/*width*/ ctx[0] === undefined && !('width' in props)) {
     			console.warn("<Drawing> was created without expected prop 'width'");
     		}
 
-    		if (/*x*/ ctx[1] === undefined && !("x" in props)) {
+    		if (/*x*/ ctx[1] === undefined && !('x' in props)) {
     			console.warn("<Drawing> was created without expected prop 'x'");
     		}
 
-    		if (/*y*/ ctx[2] === undefined && !("y" in props)) {
+    		if (/*y*/ ctx[2] === undefined && !('y' in props)) {
     			console.warn("<Drawing> was created without expected prop 'y'");
     		}
 
-    		if (/*path*/ ctx[3] === undefined && !("path" in props)) {
+    		if (/*path*/ ctx[3] === undefined && !('path' in props)) {
     			console.warn("<Drawing> was created without expected prop 'path'");
     		}
     	}
@@ -3390,7 +3491,7 @@ var app = (function () {
     	}
     }
 
-    /* src\DrawingCanvas.svelte generated by Svelte v3.21.0 */
+    /* src\DrawingCanvas.svelte generated by Svelte v3.46.4 */
     const file$5 = "src\\DrawingCanvas.svelte";
 
     function create_fragment$7(ctx) {
@@ -3403,6 +3504,7 @@ var app = (function () {
     	let svg;
     	let path_1;
     	let pannable_action;
+    	let mounted;
     	let dispose;
 
     	const block = {
@@ -3417,9 +3519,9 @@ var app = (function () {
     			t3 = space();
     			svg = svg_element("svg");
     			path_1 = svg_element("path");
-    			attr_dev(button0, "class", " w-24 bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-4\r\n      rounded mr-4");
+    			attr_dev(button0, "class", "w-24 bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-4 rounded mr-4");
     			add_location(button0, file$5, 69, 4, 1792);
-    			attr_dev(button1, "class", "w-24 bg-blue-600 hover:bg-blue-700 text-white font-bold py-1 px-4\r\n      rounded");
+    			attr_dev(button1, "class", "w-24 bg-blue-600 hover:bg-blue-700 text-white font-bold py-1 px-4 rounded");
     			add_location(button1, file$5, 75, 4, 1960);
     			attr_dev(div0, "class", "absolute right-0 bottom-0 mr-4 mb-4 flex");
     			add_location(div0, file$5, 68, 2, 1732);
@@ -3438,7 +3540,7 @@ var app = (function () {
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			insert_dev(target, div1, anchor);
     			append_dev(div1, div0);
     			append_dev(div0, button0);
@@ -3447,17 +3549,20 @@ var app = (function () {
     			append_dev(div1, t3);
     			append_dev(div1, svg);
     			append_dev(svg, path_1);
-    			/*div1_binding*/ ctx[16](div1);
-    			if (remount) run_all(dispose);
+    			/*div1_binding*/ ctx[7](div1);
 
-    			dispose = [
-    				listen_dev(button0, "click", /*cancel*/ ctx[6], false, false, false),
-    				listen_dev(button1, "click", /*finish*/ ctx[5], false, false, false),
-    				action_destroyer(pannable_action = pannable.call(null, div1)),
-    				listen_dev(div1, "panstart", /*handlePanStart*/ ctx[2], false, false, false),
-    				listen_dev(div1, "panmove", /*handlePanMove*/ ctx[3], false, false, false),
-    				listen_dev(div1, "panend", /*handlePanEnd*/ ctx[4], false, false, false)
-    			];
+    			if (!mounted) {
+    				dispose = [
+    					listen_dev(button0, "click", /*cancel*/ ctx[6], false, false, false),
+    					listen_dev(button1, "click", /*finish*/ ctx[5], false, false, false),
+    					action_destroyer(pannable_action = pannable.call(null, div1)),
+    					listen_dev(div1, "panstart", /*handlePanStart*/ ctx[2], false, false, false),
+    					listen_dev(div1, "panmove", /*handlePanMove*/ ctx[3], false, false, false),
+    					listen_dev(div1, "panend", /*handlePanEnd*/ ctx[4], false, false, false)
+    				];
+
+    				mounted = true;
+    			}
     		},
     		p: function update(ctx, [dirty]) {
     			if (dirty & /*path*/ 2) {
@@ -3468,7 +3573,8 @@ var app = (function () {
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(div1);
-    			/*div1_binding*/ ctx[16](null);
+    			/*div1_binding*/ ctx[7](null);
+    			mounted = false;
     			run_all(dispose);
     		}
     	};
@@ -3485,6 +3591,8 @@ var app = (function () {
     }
 
     function instance$7($$self, $$props, $$invalidate) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('DrawingCanvas', slots, []);
     	const dispatch = createEventDispatcher();
     	let canvas;
     	let x = 0;
@@ -3555,15 +3663,13 @@ var app = (function () {
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console.warn(`<DrawingCanvas> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<DrawingCanvas> was created with unknown prop '${key}'`);
     	});
 
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("DrawingCanvas", $$slots, []);
-
     	function div1_binding($$value) {
-    		binding_callbacks[$$value ? "unshift" : "push"](() => {
-    			$$invalidate(0, canvas = $$value);
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			canvas = $$value;
+    			$$invalidate(0, canvas);
     		});
     	}
 
@@ -3589,16 +3695,16 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("canvas" in $$props) $$invalidate(0, canvas = $$props.canvas);
-    		if ("x" in $$props) x = $$props.x;
-    		if ("y" in $$props) y = $$props.y;
-    		if ("path" in $$props) $$invalidate(1, path = $$props.path);
-    		if ("minX" in $$props) minX = $$props.minX;
-    		if ("maxX" in $$props) maxX = $$props.maxX;
-    		if ("minY" in $$props) minY = $$props.minY;
-    		if ("maxY" in $$props) maxY = $$props.maxY;
-    		if ("paths" in $$props) paths = $$props.paths;
-    		if ("drawing" in $$props) drawing = $$props.drawing;
+    		if ('canvas' in $$props) $$invalidate(0, canvas = $$props.canvas);
+    		if ('x' in $$props) x = $$props.x;
+    		if ('y' in $$props) y = $$props.y;
+    		if ('path' in $$props) $$invalidate(1, path = $$props.path);
+    		if ('minX' in $$props) minX = $$props.minX;
+    		if ('maxX' in $$props) maxX = $$props.maxX;
+    		if ('minY' in $$props) minY = $$props.minY;
+    		if ('maxY' in $$props) maxY = $$props.maxY;
+    		if ('paths' in $$props) paths = $$props.paths;
+    		if ('drawing' in $$props) drawing = $$props.drawing;
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -3613,15 +3719,6 @@ var app = (function () {
     		handlePanEnd,
     		finish,
     		cancel,
-    		x,
-    		y,
-    		minX,
-    		maxX,
-    		minY,
-    		maxY,
-    		drawing,
-    		dispatch,
-    		paths,
     		div1_binding
     	];
     }
@@ -3731,47 +3828,49 @@ var app = (function () {
       await Promise.all(pagesProcesses);
       try {
         const pdfBytes = await pdfDoc.save();
-        download(pdfBytes, name, 'application/pdf');
+        // download(pdfBytes, name, 'application/pdf');
+        return pdfBytes;
       } catch (e) {
         console.log('Failed to save PDF.');
         throw e;
       }
     }
 
-    /* src\App.svelte generated by Svelte v3.21.0 */
+    /* src\App.svelte generated by Svelte v3.46.4 */
 
     const { console: console_1, window: window_1 } = globals;
     const file$6 = "src\\App.svelte";
 
-    function get_each_context_1(ctx, list, i) {
-    	const child_ctx = ctx.slice();
-    	child_ctx[43] = list[i];
-    	return child_ctx;
-    }
-
     function get_each_context$1(ctx, list, i) {
     	const child_ctx = ctx.slice();
-    	child_ctx[40] = list[i];
-    	child_ctx[42] = i;
+    	child_ctx[43] = list[i];
+    	child_ctx[45] = i;
     	return child_ctx;
     }
 
-    // (274:2) {#if addingDrawing}
+    function get_each_context_1(ctx, list, i) {
+    	const child_ctx = ctx.slice();
+    	child_ctx[46] = list[i];
+    	return child_ctx;
+    }
+
+    // (306:2) {#if addingDrawing}
     function create_if_block_4(ctx) {
     	let div;
+    	let drawingcanvas;
     	let div_transition;
     	let current;
-    	const drawingcanvas = new DrawingCanvas({ $$inline: true });
-    	drawingcanvas.$on("finish", /*finish_handler*/ ctx[28]);
-    	drawingcanvas.$on("cancel", /*cancel_handler*/ ctx[29]);
+    	drawingcanvas = new DrawingCanvas({ $$inline: true });
+    	drawingcanvas.$on("finish", /*finish_handler*/ ctx[22]);
+    	drawingcanvas.$on("cancel", /*cancel_handler*/ ctx[23]);
 
     	const block = {
     		c: function create() {
     			div = element("div");
     			create_component(drawingcanvas.$$.fragment);
-    			attr_dev(div, "class", "fixed z-10 top-0 left-0 right-0 border-b border-gray-300 bg-white\r\n      shadow-lg");
+    			attr_dev(div, "class", "fixed z-10 top-0 left-0 right-0 border-b border-gray-300 bg-white shadow-lg");
     			set_style(div, "height", "50%");
-    			add_location(div, file$6, 274, 4, 8311);
+    			add_location(div, file$6, 306, 4, 9345);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
@@ -3807,14 +3906,14 @@ var app = (function () {
     		block,
     		id: create_if_block_4.name,
     		type: "if",
-    		source: "(274:2) {#if addingDrawing}",
+    		source: "(306:2) {#if addingDrawing}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (360:2) {:else}
+    // (392:2) {:else}
     function create_else_block(ctx) {
     	let div;
     	let span;
@@ -3824,10 +3923,10 @@ var app = (function () {
     			div = element("div");
     			span = element("span");
     			span.textContent = "Drag something here";
-    			attr_dev(span, "class", " font-bold text-3xl text-gray-500");
-    			add_location(span, file$6, 361, 6, 11784);
+    			attr_dev(span, "class", "font-bold text-3xl text-gray-500");
+    			add_location(span, file$6, 393, 6, 12818);
     			attr_dev(div, "class", "w-full flex-grow flex justify-center items-center");
-    			add_location(div, file$6, 360, 4, 11713);
+    			add_location(div, file$6, 392, 4, 12747);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
@@ -3845,14 +3944,14 @@ var app = (function () {
     		block,
     		id: create_else_block.name,
     		type: "else",
-    		source: "(360:2) {:else}",
+    		source: "(392:2) {:else}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (293:2) {#if pages.length}
+    // (325:2) {#if pages.length}
     function create_if_block$1(ctx) {
     	let div0;
     	let img;
@@ -3864,10 +3963,11 @@ var app = (function () {
     	let each_blocks = [];
     	let each_1_lookup = new Map();
     	let current;
+    	let mounted;
     	let dispose;
     	let each_value = /*pages*/ ctx[2];
     	validate_each_argument(each_value);
-    	const get_key = ctx => /*page*/ ctx[40];
+    	const get_key = ctx => /*page*/ ctx[43];
     	validate_each_keys(ctx, each_value, get_each_context$1, get_key);
 
     	for (let i = 0; i < each_value.length; i += 1) {
@@ -3889,20 +3989,20 @@ var app = (function () {
     				each_blocks[i].c();
     			}
 
-    			if (img.src !== (img_src_value = "/edit.svg")) attr_dev(img, "src", img_src_value);
+    			if (!src_url_equal(img.src, img_src_value = "/edit.svg")) attr_dev(img, "src", img_src_value);
     			attr_dev(img, "class", "mr-2");
     			attr_dev(img, "alt", "a pen, edit pdf name");
-    			add_location(img, file$6, 294, 6, 8997);
+    			add_location(img, file$6, 326, 6, 10031);
     			attr_dev(input, "placeholder", "Rename your PDF here");
     			attr_dev(input, "type", "text");
     			attr_dev(input, "class", "flex-grow bg-transparent");
-    			add_location(input, file$6, 295, 6, 9068);
+    			add_location(input, file$6, 327, 6, 10102);
     			attr_dev(div0, "class", "flex justify-center px-5 w-full md:hidden");
-    			add_location(div0, file$6, 293, 4, 8934);
+    			add_location(div0, file$6, 325, 4, 9968);
     			attr_dev(div1, "class", "w-full");
-    			add_location(div1, file$6, 301, 4, 9232);
+    			add_location(div1, file$6, 333, 4, 10266);
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			insert_dev(target, div0, anchor);
     			append_dev(div0, img);
     			append_dev(div0, t0);
@@ -3916,8 +4016,11 @@ var app = (function () {
     			}
 
     			current = true;
-    			if (remount) dispose();
-    			dispose = listen_dev(input, "input", /*input_input_handler*/ ctx[30]);
+
+    			if (!mounted) {
+    				dispose = listen_dev(input, "input", /*input_input_handler*/ ctx[24]);
+    				mounted = true;
+    			}
     		},
     		p: function update(ctx, dirty) {
     			if (dirty[0] & /*pdfName*/ 2 && input.value !== /*pdfName*/ ctx[1]) {
@@ -3925,7 +4028,7 @@ var app = (function () {
     			}
 
     			if (dirty[0] & /*selectPage, pages, selectedPageIndex, pagesScale, allObjects, updateObject, deleteObject, selectFontFamily, onMeasure*/ 254012) {
-    				const each_value = /*pages*/ ctx[2];
+    				each_value = /*pages*/ ctx[2];
     				validate_each_argument(each_value);
     				group_outros();
     				validate_each_keys(ctx, each_value, get_each_context$1, get_key);
@@ -3958,6 +4061,7 @@ var app = (function () {
     				each_blocks[i].d();
     			}
 
+    			mounted = false;
     			dispose();
     		}
     	};
@@ -3966,34 +4070,35 @@ var app = (function () {
     		block,
     		id: create_if_block$1.name,
     		type: "if",
-    		source: "(293:2) {#if pages.length}",
+    		source: "(325:2) {#if pages.length}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (341:52) 
+    // (373:52) 
     function create_if_block_3(ctx) {
+    	let drawing;
     	let current;
 
     	function update_handler_2(...args) {
-    		return /*update_handler_2*/ ctx[36](/*object*/ ctx[43], ...args);
+    		return /*update_handler_2*/ ctx[30](/*object*/ ctx[46], ...args);
     	}
 
-    	function delete_handler_2(...args) {
-    		return /*delete_handler_2*/ ctx[37](/*object*/ ctx[43], ...args);
+    	function delete_handler_2() {
+    		return /*delete_handler_2*/ ctx[31](/*object*/ ctx[46]);
     	}
 
-    	const drawing = new Drawing({
+    	drawing = new Drawing({
     			props: {
-    				path: /*object*/ ctx[43].path,
-    				x: /*object*/ ctx[43].x,
-    				y: /*object*/ ctx[43].y,
-    				width: /*object*/ ctx[43].width,
-    				originWidth: /*object*/ ctx[43].originWidth,
-    				originHeight: /*object*/ ctx[43].originHeight,
-    				pageScale: /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]]
+    				path: /*object*/ ctx[46].path,
+    				x: /*object*/ ctx[46].x,
+    				y: /*object*/ ctx[46].y,
+    				width: /*object*/ ctx[46].width,
+    				originWidth: /*object*/ ctx[46].originWidth,
+    				originHeight: /*object*/ ctx[46].originHeight,
+    				pageScale: /*pagesScale*/ ctx[3][/*pIndex*/ ctx[45]]
     			},
     			$$inline: true
     		});
@@ -4012,13 +4117,13 @@ var app = (function () {
     		p: function update(new_ctx, dirty) {
     			ctx = new_ctx;
     			const drawing_changes = {};
-    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.path = /*object*/ ctx[43].path;
-    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.x = /*object*/ ctx[43].x;
-    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.y = /*object*/ ctx[43].y;
-    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.width = /*object*/ ctx[43].width;
-    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.originWidth = /*object*/ ctx[43].originWidth;
-    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.originHeight = /*object*/ ctx[43].originHeight;
-    			if (dirty[0] & /*pagesScale, pages*/ 12) drawing_changes.pageScale = /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]];
+    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.path = /*object*/ ctx[46].path;
+    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.x = /*object*/ ctx[46].x;
+    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.y = /*object*/ ctx[46].y;
+    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.width = /*object*/ ctx[46].width;
+    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.originWidth = /*object*/ ctx[46].originWidth;
+    			if (dirty[0] & /*allObjects, pages*/ 20) drawing_changes.originHeight = /*object*/ ctx[46].originHeight;
+    			if (dirty[0] & /*pagesScale, pages*/ 12) drawing_changes.pageScale = /*pagesScale*/ ctx[3][/*pIndex*/ ctx[45]];
     			drawing.$set(drawing_changes);
     		},
     		i: function intro(local) {
@@ -4039,34 +4144,35 @@ var app = (function () {
     		block,
     		id: create_if_block_3.name,
     		type: "if",
-    		source: "(341:52) ",
+    		source: "(373:52) ",
     		ctx
     	});
 
     	return block;
     }
 
-    // (329:49) 
+    // (361:49) 
     function create_if_block_2(ctx) {
+    	let text_1;
     	let current;
 
     	function update_handler_1(...args) {
-    		return /*update_handler_1*/ ctx[34](/*object*/ ctx[43], ...args);
+    		return /*update_handler_1*/ ctx[28](/*object*/ ctx[46], ...args);
     	}
 
-    	function delete_handler_1(...args) {
-    		return /*delete_handler_1*/ ctx[35](/*object*/ ctx[43], ...args);
+    	function delete_handler_1() {
+    		return /*delete_handler_1*/ ctx[29](/*object*/ ctx[46]);
     	}
 
-    	const text_1 = new Text({
+    	text_1 = new Text({
     			props: {
-    				text: /*object*/ ctx[43].text,
-    				x: /*object*/ ctx[43].x,
-    				y: /*object*/ ctx[43].y,
-    				size: /*object*/ ctx[43].size,
-    				lineHeight: /*object*/ ctx[43].lineHeight,
-    				fontFamily: /*object*/ ctx[43].fontFamily,
-    				pageScale: /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]]
+    				text: /*object*/ ctx[46].text,
+    				x: /*object*/ ctx[46].x,
+    				y: /*object*/ ctx[46].y,
+    				size: /*object*/ ctx[46].size,
+    				lineHeight: /*object*/ ctx[46].lineHeight,
+    				fontFamily: /*object*/ ctx[46].fontFamily,
+    				pageScale: /*pagesScale*/ ctx[3][/*pIndex*/ ctx[45]]
     			},
     			$$inline: true
     		});
@@ -4086,13 +4192,13 @@ var app = (function () {
     		p: function update(new_ctx, dirty) {
     			ctx = new_ctx;
     			const text_1_changes = {};
-    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.text = /*object*/ ctx[43].text;
-    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.x = /*object*/ ctx[43].x;
-    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.y = /*object*/ ctx[43].y;
-    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.size = /*object*/ ctx[43].size;
-    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.lineHeight = /*object*/ ctx[43].lineHeight;
-    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.fontFamily = /*object*/ ctx[43].fontFamily;
-    			if (dirty[0] & /*pagesScale, pages*/ 12) text_1_changes.pageScale = /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]];
+    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.text = /*object*/ ctx[46].text;
+    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.x = /*object*/ ctx[46].x;
+    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.y = /*object*/ ctx[46].y;
+    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.size = /*object*/ ctx[46].size;
+    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.lineHeight = /*object*/ ctx[46].lineHeight;
+    			if (dirty[0] & /*allObjects, pages*/ 20) text_1_changes.fontFamily = /*object*/ ctx[46].fontFamily;
+    			if (dirty[0] & /*pagesScale, pages*/ 12) text_1_changes.pageScale = /*pagesScale*/ ctx[3][/*pIndex*/ ctx[45]];
     			text_1.$set(text_1_changes);
     		},
     		i: function intro(local) {
@@ -4113,34 +4219,35 @@ var app = (function () {
     		block,
     		id: create_if_block_2.name,
     		type: "if",
-    		source: "(329:49) ",
+    		source: "(361:49) ",
     		ctx
     	});
 
     	return block;
     }
 
-    // (318:16) {#if object.type === 'image'}
+    // (350:16) {#if object.type === 'image'}
     function create_if_block_1(ctx) {
+    	let image;
     	let current;
 
     	function update_handler(...args) {
-    		return /*update_handler*/ ctx[32](/*object*/ ctx[43], ...args);
+    		return /*update_handler*/ ctx[26](/*object*/ ctx[46], ...args);
     	}
 
-    	function delete_handler(...args) {
-    		return /*delete_handler*/ ctx[33](/*object*/ ctx[43], ...args);
+    	function delete_handler() {
+    		return /*delete_handler*/ ctx[27](/*object*/ ctx[46]);
     	}
 
-    	const image = new Image$1({
+    	image = new Image$1({
     			props: {
-    				file: /*object*/ ctx[43].file,
-    				payload: /*object*/ ctx[43].payload,
-    				x: /*object*/ ctx[43].x,
-    				y: /*object*/ ctx[43].y,
-    				width: /*object*/ ctx[43].width,
-    				height: /*object*/ ctx[43].height,
-    				pageScale: /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]]
+    				file: /*object*/ ctx[46].file,
+    				payload: /*object*/ ctx[46].payload,
+    				x: /*object*/ ctx[46].x,
+    				y: /*object*/ ctx[46].y,
+    				width: /*object*/ ctx[46].width,
+    				height: /*object*/ ctx[46].height,
+    				pageScale: /*pagesScale*/ ctx[3][/*pIndex*/ ctx[45]]
     			},
     			$$inline: true
     		});
@@ -4159,13 +4266,13 @@ var app = (function () {
     		p: function update(new_ctx, dirty) {
     			ctx = new_ctx;
     			const image_changes = {};
-    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.file = /*object*/ ctx[43].file;
-    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.payload = /*object*/ ctx[43].payload;
-    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.x = /*object*/ ctx[43].x;
-    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.y = /*object*/ ctx[43].y;
-    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.width = /*object*/ ctx[43].width;
-    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.height = /*object*/ ctx[43].height;
-    			if (dirty[0] & /*pagesScale, pages*/ 12) image_changes.pageScale = /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]];
+    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.file = /*object*/ ctx[46].file;
+    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.payload = /*object*/ ctx[46].payload;
+    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.x = /*object*/ ctx[46].x;
+    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.y = /*object*/ ctx[46].y;
+    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.width = /*object*/ ctx[46].width;
+    			if (dirty[0] & /*allObjects, pages*/ 20) image_changes.height = /*object*/ ctx[46].height;
+    			if (dirty[0] & /*pagesScale, pages*/ 12) image_changes.pageScale = /*pagesScale*/ ctx[3][/*pIndex*/ ctx[45]];
     			image.$set(image_changes);
     		},
     		i: function intro(local) {
@@ -4186,14 +4293,14 @@ var app = (function () {
     		block,
     		id: create_if_block_1.name,
     		type: "if",
-    		source: "(318:16) {#if object.type === 'image'}",
+    		source: "(350:16) {#if object.type === 'image'}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (317:14) {#each allObjects[pIndex] as object (object.id)}
+    // (349:14) {#each allObjects[pIndex] as object (object.id)}
     function create_each_block_1(key_1, ctx) {
     	let first;
     	let current_block_type_index;
@@ -4204,9 +4311,9 @@ var app = (function () {
     	const if_blocks = [];
 
     	function select_block_type_1(ctx, dirty) {
-    		if (/*object*/ ctx[43].type === "image") return 0;
-    		if (/*object*/ ctx[43].type === "text") return 1;
-    		if (/*object*/ ctx[43].type === "drawing") return 2;
+    		if (/*object*/ ctx[46].type === 'image') return 0;
+    		if (/*object*/ ctx[46].type === 'text') return 1;
+    		if (/*object*/ ctx[46].type === 'drawing') return 2;
     		return -1;
     	}
 
@@ -4233,7 +4340,8 @@ var app = (function () {
     			insert_dev(target, if_block_anchor, anchor);
     			current = true;
     		},
-    		p: function update(ctx, dirty) {
+    		p: function update(new_ctx, dirty) {
+    			ctx = new_ctx;
     			let previous_block_index = current_block_type_index;
     			current_block_type_index = select_block_type_1(ctx);
 
@@ -4258,6 +4366,8 @@ var app = (function () {
     					if (!if_block) {
     						if_block = if_blocks[current_block_type_index] = if_block_creators[current_block_type_index](ctx);
     						if_block.c();
+    					} else {
+    						if_block.p(ctx, dirty);
     					}
 
     					transition_in(if_block, 1);
@@ -4291,38 +4401,40 @@ var app = (function () {
     		block,
     		id: create_each_block_1.name,
     		type: "each",
-    		source: "(317:14) {#each allObjects[pIndex] as object (object.id)}",
+    		source: "(349:14) {#each allObjects[pIndex] as object (object.id)}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (303:6) {#each pages as page, pIndex (page)}
+    // (335:6) {#each pages as page, pIndex (page)}
     function create_each_block$1(key_1, ctx) {
     	let div2;
     	let div1;
+    	let pdfpage;
     	let t0;
     	let div0;
     	let each_blocks = [];
     	let each_1_lookup = new Map();
     	let t1;
     	let current;
+    	let mounted;
     	let dispose;
 
     	function measure_handler(...args) {
-    		return /*measure_handler*/ ctx[31](/*pIndex*/ ctx[42], ...args);
+    		return /*measure_handler*/ ctx[25](/*pIndex*/ ctx[45], ...args);
     	}
 
-    	const pdfpage = new PDFPage({
-    			props: { page: /*page*/ ctx[40] },
+    	pdfpage = new PDFPage({
+    			props: { page: /*page*/ ctx[43] },
     			$$inline: true
     		});
 
     	pdfpage.$on("measure", measure_handler);
-    	let each_value_1 = /*allObjects*/ ctx[4][/*pIndex*/ ctx[42]];
+    	let each_value_1 = /*allObjects*/ ctx[4][/*pIndex*/ ctx[45]];
     	validate_each_argument(each_value_1);
-    	const get_key = ctx => /*object*/ ctx[43].id;
+    	const get_key = ctx => /*object*/ ctx[46].id;
     	validate_each_keys(ctx, each_value_1, get_each_context_1, get_key);
 
     	for (let i = 0; i < each_value_1.length; i += 1) {
@@ -4331,12 +4443,12 @@ var app = (function () {
     		each_1_lookup.set(key, each_blocks[i] = create_each_block_1(key, child_ctx));
     	}
 
-    	function mousedown_handler(...args) {
-    		return /*mousedown_handler*/ ctx[38](/*pIndex*/ ctx[42], ...args);
+    	function mousedown_handler() {
+    		return /*mousedown_handler*/ ctx[32](/*pIndex*/ ctx[45]);
     	}
 
-    	function touchstart_handler(...args) {
-    		return /*touchstart_handler*/ ctx[39](/*pIndex*/ ctx[42], ...args);
+    	function touchstart_handler() {
+    		return /*touchstart_handler*/ ctx[33](/*pIndex*/ ctx[45]);
     	}
 
     	const block = {
@@ -4355,17 +4467,17 @@ var app = (function () {
 
     			t1 = space();
     			attr_dev(div0, "class", "absolute top-0 left-0 transform origin-top-left");
-    			set_style(div0, "transform", "scale(" + /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]] + ")");
+    			set_style(div0, "transform", "scale(" + /*pagesScale*/ ctx[3][/*pIndex*/ ctx[45]] + ")");
     			set_style(div0, "touch-action", "none");
-    			add_location(div0, file$6, 313, 12, 9737);
+    			add_location(div0, file$6, 345, 12, 10771);
     			attr_dev(div1, "class", "relative shadow-lg");
-    			toggle_class(div1, "shadow-outline", /*pIndex*/ ctx[42] === /*selectedPageIndex*/ ctx[5]);
-    			add_location(div1, file$6, 307, 10, 9499);
+    			toggle_class(div1, "shadow-outline", /*pIndex*/ ctx[45] === /*selectedPageIndex*/ ctx[5]);
+    			add_location(div1, file$6, 339, 10, 10533);
     			attr_dev(div2, "class", "p-5 w-full flex flex-col items-center overflow-hidden");
-    			add_location(div2, file$6, 303, 8, 9306);
+    			add_location(div2, file$6, 335, 8, 10340);
     			this.first = div2;
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			insert_dev(target, div2, anchor);
     			append_dev(div2, div1);
     			mount_component(pdfpage, div1, null);
@@ -4378,21 +4490,24 @@ var app = (function () {
 
     			append_dev(div2, t1);
     			current = true;
-    			if (remount) run_all(dispose);
 
-    			dispose = [
-    				listen_dev(div2, "mousedown", mousedown_handler, false, false, false),
-    				listen_dev(div2, "touchstart", touchstart_handler, { passive: true }, false, false)
-    			];
+    			if (!mounted) {
+    				dispose = [
+    					listen_dev(div2, "mousedown", mousedown_handler, false, false, false),
+    					listen_dev(div2, "touchstart", touchstart_handler, { passive: true }, false, false)
+    				];
+
+    				mounted = true;
+    			}
     		},
     		p: function update(new_ctx, dirty) {
     			ctx = new_ctx;
     			const pdfpage_changes = {};
-    			if (dirty[0] & /*pages*/ 4) pdfpage_changes.page = /*page*/ ctx[40];
+    			if (dirty[0] & /*pages*/ 4) pdfpage_changes.page = /*page*/ ctx[43];
     			pdfpage.$set(pdfpage_changes);
 
     			if (dirty[0] & /*allObjects, pages, pagesScale, updateObject, deleteObject, selectFontFamily*/ 106524) {
-    				const each_value_1 = /*allObjects*/ ctx[4][/*pIndex*/ ctx[42]];
+    				each_value_1 = /*allObjects*/ ctx[4][/*pIndex*/ ctx[45]];
     				validate_each_argument(each_value_1);
     				group_outros();
     				validate_each_keys(ctx, each_value_1, get_each_context_1, get_key);
@@ -4401,11 +4516,11 @@ var app = (function () {
     			}
 
     			if (!current || dirty[0] & /*pagesScale, pages*/ 12) {
-    				set_style(div0, "transform", "scale(" + /*pagesScale*/ ctx[3][/*pIndex*/ ctx[42]] + ")");
+    				set_style(div0, "transform", "scale(" + /*pagesScale*/ ctx[3][/*pIndex*/ ctx[45]] + ")");
     			}
 
     			if (dirty[0] & /*pages, selectedPageIndex*/ 36) {
-    				toggle_class(div1, "shadow-outline", /*pIndex*/ ctx[42] === /*selectedPageIndex*/ ctx[5]);
+    				toggle_class(div1, "shadow-outline", /*pIndex*/ ctx[45] === /*selectedPageIndex*/ ctx[5]);
     			}
     		},
     		i: function intro(local) {
@@ -4435,6 +4550,7 @@ var app = (function () {
     				each_blocks[i].d();
     			}
 
+    			mounted = false;
     			run_all(dispose);
     		}
     	};
@@ -4443,7 +4559,7 @@ var app = (function () {
     		block,
     		id: create_each_block$1.name,
     		type: "each",
-    		source: "(303:6) {#each pages as page, pIndex (page)}",
+    		source: "(335:6) {#each pages as page, pIndex (page)}",
     		ctx
     	});
 
@@ -4451,6 +4567,7 @@ var app = (function () {
     }
 
     function create_fragment$8(ctx) {
+    	let tailwind;
     	let t0;
     	let main;
     	let div2;
@@ -4476,15 +4593,16 @@ var app = (function () {
     	let input1;
     	let t6;
     	let button;
-    	let t7_value = (/*saving*/ ctx[6] ? "Saving" : "Save") + "";
+    	let t7_value = (/*saving*/ ctx[6] ? 'Saving' : 'Save') + "";
     	let t7;
     	let t8;
     	let t9;
     	let current_block_type_index;
     	let if_block1;
     	let current;
+    	let mounted;
     	let dispose;
-    	const tailwind = new Tailwind({ $$inline: true });
+    	tailwind = new Tailwind({ $$inline: true });
     	let if_block0 = /*addingDrawing*/ ctx[7] && create_if_block_4(ctx);
     	const if_block_creators = [create_if_block$1, create_else_block];
     	const if_blocks = [];
@@ -4530,55 +4648,55 @@ var app = (function () {
     			attr_dev(input0, "id", "image");
     			attr_dev(input0, "name", "image");
     			attr_dev(input0, "class", "hidden");
-    			add_location(input0, file$6, 215, 4, 6118);
-    			if (img0.src !== (img0_src_value = "image.svg")) attr_dev(img0, "src", img0_src_value);
+    			add_location(input0, file$6, 245, 4, 7135);
+    			if (!src_url_equal(img0.src, img0_src_value = "image.svg")) attr_dev(img0, "src", img0_src_value);
     			attr_dev(img0, "alt", "An icon for adding images");
-    			add_location(img0, file$6, 236, 8, 6818);
-    			attr_dev(label0, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500\r\n        cursor-pointer");
+    			add_location(img0, file$6, 266, 8, 7835);
+    			attr_dev(label0, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500 cursor-pointer");
     			attr_dev(label0, "for", "image");
     			toggle_class(label0, "cursor-not-allowed", /*selectedPageIndex*/ ctx[5] < 0);
     			toggle_class(label0, "bg-gray-500", /*selectedPageIndex*/ ctx[5] < 0);
-    			add_location(label0, file$6, 230, 6, 6568);
-    			if (img1.src !== (img1_src_value = "notes.svg")) attr_dev(img1, "src", img1_src_value);
+    			add_location(label0, file$6, 260, 6, 7585);
+    			if (!src_url_equal(img1.src, img1_src_value = "notes.svg")) attr_dev(img1, "src", img1_src_value);
     			attr_dev(img1, "alt", "An icon for adding text");
-    			add_location(img1, file$6, 245, 8, 7181);
-    			attr_dev(label1, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500\r\n        cursor-pointer");
+    			add_location(img1, file$6, 275, 8, 8198);
+    			attr_dev(label1, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500 cursor-pointer");
     			attr_dev(label1, "for", "text");
     			toggle_class(label1, "cursor-not-allowed", /*selectedPageIndex*/ ctx[5] < 0);
     			toggle_class(label1, "bg-gray-500", /*selectedPageIndex*/ ctx[5] < 0);
-    			add_location(label1, file$6, 238, 6, 6897);
-    			if (img2.src !== (img2_src_value = "gesture.svg")) attr_dev(img2, "src", img2_src_value);
+    			add_location(label1, file$6, 268, 6, 7914);
+    			if (!src_url_equal(img2.src, img2_src_value = "gesture.svg")) attr_dev(img2, "src", img2_src_value);
     			attr_dev(img2, "alt", "An icon for adding drawing");
-    			add_location(img2, file$6, 253, 8, 7520);
-    			attr_dev(label2, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500\r\n        cursor-pointer");
+    			add_location(img2, file$6, 283, 8, 8537);
+    			attr_dev(label2, "class", "flex items-center justify-center h-full w-8 hover:bg-gray-500 cursor-pointer");
     			toggle_class(label2, "cursor-not-allowed", /*selectedPageIndex*/ ctx[5] < 0);
     			toggle_class(label2, "bg-gray-500", /*selectedPageIndex*/ ctx[5] < 0);
-    			add_location(label2, file$6, 247, 6, 7258);
-    			attr_dev(div0, "class", "relative mr-3 flex h-8 bg-gray-400 rounded-sm overflow-hidden\r\n      md:mr-4");
-    			add_location(div0, file$6, 227, 4, 6463);
-    			if (img3.src !== (img3_src_value = "/edit.svg")) attr_dev(img3, "src", img3_src_value);
+    			add_location(label2, file$6, 277, 6, 8275);
+    			attr_dev(div0, "class", "relative mr-3 flex h-8 bg-gray-400 rounded-sm overflow-hidden md:mr-4");
+    			add_location(div0, file$6, 257, 4, 7480);
+    			if (!src_url_equal(img3.src, img3_src_value = "/edit.svg")) attr_dev(img3, "src", img3_src_value);
     			attr_dev(img3, "class", "mr-2");
     			attr_dev(img3, "alt", "a pen, edit pdf name");
-    			add_location(img3, file$6, 257, 6, 7692);
+    			add_location(img3, file$6, 287, 6, 8709);
     			attr_dev(input1, "placeholder", "Rename your PDF here");
     			attr_dev(input1, "type", "text");
     			attr_dev(input1, "class", "flex-grow bg-transparent");
-    			add_location(input1, file$6, 258, 6, 7763);
+    			add_location(input1, file$6, 288, 6, 8780);
     			attr_dev(div1, "class", "justify-center mr-3 md:mr-4 w-full max-w-xs hidden md:flex");
-    			add_location(div1, file$6, 256, 4, 7612);
-    			attr_dev(button, "class", "w-20 bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-3\r\n      md:px-4 mr-3 md:mr-4 rounded");
+    			add_location(div1, file$6, 286, 4, 8629);
+    			attr_dev(button, "class", "w-20 bg-blue-500 hover:bg-blue-700 text-white font-bold py-1 px-3 md:px-4 mr-3 md:mr-4 rounded");
     			toggle_class(button, "cursor-not-allowed", /*pages*/ ctx[2].length === 0 || /*saving*/ ctx[6] || !/*pdfFile*/ ctx[0]);
     			toggle_class(button, "bg-blue-700", /*pages*/ ctx[2].length === 0 || /*saving*/ ctx[6] || !/*pdfFile*/ ctx[0]);
-    			add_location(button, file$6, 264, 4, 7927);
-    			attr_dev(div2, "class", "fixed z-10 top-0 left-0 right-0 h-12 flex justify-center items-center\r\n    bg-gray-200 border-b border-gray-300");
-    			add_location(div2, file$6, 206, 2, 5853);
+    			add_location(button, file$6, 295, 4, 8953);
+    			attr_dev(div2, "class", "fixed z-10 top-0 left-0 right-0 h-12 flex justify-center items-center bg-gray-200 border-b border-gray-300");
+    			add_location(div2, file$6, 236, 2, 6870);
     			attr_dev(main, "class", "flex flex-col items-center py-16 bg-gray-100 min-h-screen");
-    			add_location(main, file$6, 205, 0, 5777);
+    			add_location(main, file$6, 235, 0, 6794);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
-    		m: function mount(target, anchor, remount) {
+    		m: function mount(target, anchor) {
     			mount_component(tailwind, target, anchor);
     			insert_dev(target, t0, anchor);
     			insert_dev(target, main, anchor);
@@ -4608,18 +4726,21 @@ var app = (function () {
     			append_dev(main, t9);
     			if_blocks[current_block_type_index].m(main, null);
     			current = true;
-    			if (remount) run_all(dispose);
 
-    			dispose = [
-    				listen_dev(window_1, "dragenter", prevent_default(/*dragenter_handler*/ ctx[25]), false, true, false),
-    				listen_dev(window_1, "dragover", prevent_default(/*dragover_handler*/ ctx[26]), false, true, false),
-    				listen_dev(window_1, "drop", prevent_default(/*onUploadPDF*/ ctx[8]), false, true, false),
-    				listen_dev(input0, "change", /*onUploadImage*/ ctx[9], false, false, false),
-    				listen_dev(label1, "click", /*onAddTextField*/ ctx[10], false, false, false),
-    				listen_dev(label2, "click", /*onAddDrawing*/ ctx[11], false, false, false),
-    				listen_dev(input1, "input", /*input1_input_handler*/ ctx[27]),
-    				listen_dev(button, "click", /*savePDF*/ ctx[18], false, false, false)
-    			];
+    			if (!mounted) {
+    				dispose = [
+    					listen_dev(window_1, "dragenter", prevent_default(/*dragenter_handler*/ ctx[19]), false, true, false),
+    					listen_dev(window_1, "dragover", prevent_default(/*dragover_handler*/ ctx[20]), false, true, false),
+    					listen_dev(window_1, "drop", prevent_default(/*onUploadPDF*/ ctx[8]), false, true, false),
+    					listen_dev(input0, "change", /*onUploadImage*/ ctx[9], false, false, false),
+    					listen_dev(label1, "click", /*onAddTextField*/ ctx[10], false, false, false),
+    					listen_dev(label2, "click", /*onAddDrawing*/ ctx[11], false, false, false),
+    					listen_dev(input1, "input", /*input1_input_handler*/ ctx[21]),
+    					listen_dev(button, "click", /*savePDF*/ ctx[18], false, false, false)
+    				];
+
+    				mounted = true;
+    			}
     		},
     		p: function update(ctx, dirty) {
     			if (dirty[0] & /*selectedPageIndex*/ 32) {
@@ -4650,7 +4771,7 @@ var app = (function () {
     				set_input_value(input1, /*pdfName*/ ctx[1]);
     			}
 
-    			if ((!current || dirty[0] & /*saving*/ 64) && t7_value !== (t7_value = (/*saving*/ ctx[6] ? "Saving" : "Save") + "")) set_data_dev(t7, t7_value);
+    			if ((!current || dirty[0] & /*saving*/ 64) && t7_value !== (t7_value = (/*saving*/ ctx[6] ? 'Saving' : 'Save') + "")) set_data_dev(t7, t7_value);
 
     			if (dirty[0] & /*pages, saving, pdfFile*/ 69) {
     				toggle_class(button, "cursor-not-allowed", /*pages*/ ctx[2].length === 0 || /*saving*/ ctx[6] || !/*pdfFile*/ ctx[0]);
@@ -4701,6 +4822,8 @@ var app = (function () {
     				if (!if_block1) {
     					if_block1 = if_blocks[current_block_type_index] = if_block_creators[current_block_type_index](ctx);
     					if_block1.c();
+    				} else {
+    					if_block1.p(ctx, dirty);
     				}
 
     				transition_in(if_block1, 1);
@@ -4726,6 +4849,7 @@ var app = (function () {
     			if (detaching) detach_dev(main);
     			if (if_block0) if_block0.d();
     			if_blocks[current_block_type_index].d();
+    			mounted = false;
     			run_all(dispose);
     		}
     	};
@@ -4742,6 +4866,8 @@ var app = (function () {
     }
 
     function instance$8($$self, $$props, $$invalidate) {
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('App', slots, []);
     	const genID = ggID();
     	let pdfFile;
     	let pdfName = "";
@@ -4753,24 +4879,44 @@ var app = (function () {
     	let selectedPageIndex = -1;
     	let saving = false;
     	let addingDrawing = false;
+    	let user_id = "";
+    	let modul_id = "";
+    	let pdf_path = "";
 
     	// for test purpose
     	onMount(async () => {
     		try {
     			const urlParams = new URLSearchParams(window.location.search);
-    			const hasUrl = urlParams.has("url");
+    			user_id = urlParams.has('user_id') ? urlParams.get('user_id') : "";
+
+    			modul_id = urlParams.has('modul_id')
+    			? urlParams.get('modul_id')
+    			: "";
+
+    			pdf_path = urlParams.has('pdf_path')
+    			? urlParams.get('pdf_path')
+    			: "";
+
+    			console.log("user id: ", user_id);
+    			console.log("modul id: ", modul_id);
+    			console.log("pdf path: ", pdf_path);
+    			const hasUrl = urlParams.has('url');
     			const url = urlParams.get("url");
     			console.log("URL: ", url);
 
     			const res = hasUrl
-    			? await fetch(`https://justcors.com/tl_c3ab6d9/${url}`)
+    			? await fetch(`${url}`)
     			: await fetch("/test.pdf");
 
     			// const res = await fetch("http://127.0.0.1:8000/uploads/modul/DIGIBOOK_FILE_04_12_2021_01_20_16.pdf");
-    			const pdfBlob = await res.blob();
+    			console.log("A");
 
+    			const pdfBlob = await res.blob();
+    			console.log("B");
     			await addPDF(pdfBlob);
+    			console.log("C");
     			$$invalidate(5, selectedPageIndex = 0);
+    			console.log("D");
 
     			setTimeout(
     				() => {
@@ -4779,6 +4925,8 @@ var app = (function () {
     				},
     				5000
     			);
+
+    			console.log("E");
     		} catch(e) {
     			console.log(e); // const imgBlob = await (await fetch("/test.jpg")).blob();
     		}
@@ -4938,7 +5086,17 @@ var app = (function () {
     		$$invalidate(6, saving = true);
 
     		try {
-    			await save(pdfFile, allObjects, pdfName, pagesScale);
+    			const pdfBytes = await save(pdfFile, allObjects, pdfName, pagesScale);
+    			var formData = new FormData();
+    			var blob = new Blob([pdfBytes], { type: "application/pdf" });
+    			formData.append("modul", blob);
+    			formData.append("user_id", user_id);
+    			formData.append("modul_id", modul_id);
+    			formData.append("pdf_path", pdf_path);
+    			var request = new XMLHttpRequest();
+    			request.open("POST", "http://localhost:8000/api/moduls/upload");
+    			request.send(formData);
+    			console.log("Store to server success!");
     		} catch(e) {
     			console.log(e);
     		} finally {
@@ -4949,18 +5107,15 @@ var app = (function () {
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== "$$") console_1.warn(`<App> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1.warn(`<App> was created with unknown prop '${key}'`);
     	});
 
-    	let { $$slots = {}, $$scope } = $$props;
-    	validate_slots("App", $$slots, []);
-
     	function dragenter_handler(event) {
-    		bubble($$self, event);
+    		bubble.call(this, $$self, event);
     	}
 
     	function dragover_handler(event) {
-    		bubble($$self, event);
+    		bubble.call(this, $$self, event);
     	}
 
     	function input1_input_handler() {
@@ -5025,6 +5180,9 @@ var app = (function () {
     		selectedPageIndex,
     		saving,
     		addingDrawing,
+    		user_id,
+    		modul_id,
+    		pdf_path,
     		onUploadPDF,
     		addPDF,
     		onUploadImage,
@@ -5042,16 +5200,19 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ("pdfFile" in $$props) $$invalidate(0, pdfFile = $$props.pdfFile);
-    		if ("pdfName" in $$props) $$invalidate(1, pdfName = $$props.pdfName);
-    		if ("pages" in $$props) $$invalidate(2, pages = $$props.pages);
-    		if ("pagesScale" in $$props) $$invalidate(3, pagesScale = $$props.pagesScale);
-    		if ("allObjects" in $$props) $$invalidate(4, allObjects = $$props.allObjects);
-    		if ("currentFont" in $$props) currentFont = $$props.currentFont;
-    		if ("focusId" in $$props) focusId = $$props.focusId;
-    		if ("selectedPageIndex" in $$props) $$invalidate(5, selectedPageIndex = $$props.selectedPageIndex);
-    		if ("saving" in $$props) $$invalidate(6, saving = $$props.saving);
-    		if ("addingDrawing" in $$props) $$invalidate(7, addingDrawing = $$props.addingDrawing);
+    		if ('pdfFile' in $$props) $$invalidate(0, pdfFile = $$props.pdfFile);
+    		if ('pdfName' in $$props) $$invalidate(1, pdfName = $$props.pdfName);
+    		if ('pages' in $$props) $$invalidate(2, pages = $$props.pages);
+    		if ('pagesScale' in $$props) $$invalidate(3, pagesScale = $$props.pagesScale);
+    		if ('allObjects' in $$props) $$invalidate(4, allObjects = $$props.allObjects);
+    		if ('currentFont' in $$props) currentFont = $$props.currentFont;
+    		if ('focusId' in $$props) focusId = $$props.focusId;
+    		if ('selectedPageIndex' in $$props) $$invalidate(5, selectedPageIndex = $$props.selectedPageIndex);
+    		if ('saving' in $$props) $$invalidate(6, saving = $$props.saving);
+    		if ('addingDrawing' in $$props) $$invalidate(7, addingDrawing = $$props.addingDrawing);
+    		if ('user_id' in $$props) user_id = $$props.user_id;
+    		if ('modul_id' in $$props) modul_id = $$props.modul_id;
+    		if ('pdf_path' in $$props) pdf_path = $$props.pdf_path;
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -5078,12 +5239,6 @@ var app = (function () {
     		deleteObject,
     		onMeasure,
     		savePDF,
-    		currentFont,
-    		genID,
-    		focusId,
-    		addPDF,
-    		addImage,
-    		addTextField,
     		dragenter_handler,
     		dragover_handler,
     		input1_input_handler,
@@ -5105,7 +5260,7 @@ var app = (function () {
     class App extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$8, create_fragment$8, safe_not_equal, {}, [-1, -1]);
+    		init(this, options, instance$8, create_fragment$8, safe_not_equal, {}, null, [-1, -1]);
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
