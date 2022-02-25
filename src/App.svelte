@@ -46,7 +46,7 @@
       console.log("pdf path: ",pdf_path)
 
       const hasUrl = urlParams.has('url');
-      const url = urlParams.get("url");
+      const url = "https://cors-anywhere.herokuapp.com/"+urlParams.get("url");
       console.log("URL: ",url)
       const res = hasUrl ? await fetch(`${url}`) : await fetch("/test.pdf");
       // const res = await fetch("http://127.0.0.1:8000/uploads/modul/DIGIBOOK_FILE_04_12_2021_01_20_16.pdf");
