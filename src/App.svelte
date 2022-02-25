@@ -27,24 +27,41 @@
   let selectedPageIndex = -1;
   let saving = false;
   let addingDrawing = false;
+
+  let user_id = "";
+  let modul_id = "";
+  let pdf_path = "";
   // for test purpose
   onMount(async () => {
 
     try {
       const urlParams = new URLSearchParams(window.location.search);
 
+      user_id = urlParams.has('user_id') ? urlParams.get('user_id') : "";
+      modul_id = urlParams.has('modul_id') ? urlParams.get('modul_id') : "";
+      pdf_path = urlParams.has('pdf_path') ? urlParams.get('pdf_path') : "";
+
+      console.log("user id: ",user_id)
+      console.log("modul id: ",modul_id)
+      console.log("pdf path: ",pdf_path)
+
       const hasUrl = urlParams.has('url');
       const url = urlParams.get("url");
       console.log("URL: ",url)
-      const res = hasUrl ? await fetch(`https://justcors.com/tl_c3ab6d9/${url}`) : await fetch("/test.pdf");
+      const res = hasUrl ? await fetch(`${url}`) : await fetch("/test.pdf");
       // const res = await fetch("http://127.0.0.1:8000/uploads/modul/DIGIBOOK_FILE_04_12_2021_01_20_16.pdf");
+      console.log("A");
       const pdfBlob = await res.blob();
+      console.log("B");
       await addPDF(pdfBlob);
+      console.log("C");
       selectedPageIndex = 0;
+      console.log("D");
       setTimeout(() => {
         fetchFont(currentFont);
         prepareAssets();
       }, 5000);
+      console.log("E");
       // const imgBlob = await (await fetch("/test.jpg")).blob();
       // addImage(imgBlob);
       // addTextField("dika");
@@ -189,7 +206,20 @@
     if (!pdfFile || saving || !pages.length) return;
     saving = true;
     try {
-      await save(pdfFile, allObjects, pdfName, pagesScale);
+      const pdfBytes = await save(pdfFile, allObjects, pdfName, pagesScale);
+
+      var formData = new FormData();
+      var blob = new Blob([pdfBytes], { type: "application/pdf"});
+
+      formData.append("modul", blob);
+      formData.append("user_id", user_id);
+      formData.append("modul_id", modul_id);
+      formData.append("pdf_path", pdf_path);
+
+      var request = new XMLHttpRequest();
+      request.open("POST", "http://localhost:8000/api/moduls/upload");
+      request.send(formData);
+      console.log("Store to server success!");
     } catch (e) {
       console.log(e);
     } finally {
@@ -260,7 +290,8 @@
         placeholder="Rename your PDF here"
         type="text"
         class="flex-grow bg-transparent"
-        bind:value={pdfName} />
+        bind:value={pdfName}
+        />
     </div>
     <button
       on:click={savePDF}
@@ -268,6 +299,7 @@
       md:px-4 mr-3 md:mr-4 rounded"
       class:cursor-not-allowed={pages.length === 0 || saving || !pdfFile}
       class:bg-blue-700={pages.length === 0 || saving || !pdfFile}>
+      
       {saving ? 'Saving' : 'Save'}
     </button>
   </div>
